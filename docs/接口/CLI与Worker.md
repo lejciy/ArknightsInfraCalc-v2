@@ -26,7 +26,7 @@
 | `layout eval` | `commands/layout.rs::layout_eval_cmd` | layout、operbox、assignment | 固定编制结算；`--explain-json` 输出结构化 trace |
 | `debug rerun` | `commands/debug.rs::rerun_cmd` | 生产 debug bundle | 用当前 runtime 重跑并输出稳定行为投影；不是旧二进制重放 |
 | `verify` | `commands/verify.rs::verify_cmd` | case id 或 `--all` | 回归夹具与单位产出锚点断言 |
-| `bake` | `commands/bake.rs::bake_cmd` | all/trade/manufacture、输出目录 | 生成/验证本地候选 catalog；不改变 solver 语义 |
+| `bake` | `commands/bake.rs::bake_cmd` | all/trade/manufacture、输出目录 | 生成并原子发布本地候选 catalog；不执行 Bake 校验，更新后显式重建 |
 | `profile` | `commands/profile.rs::profile_cmd` | 性能分析参数 | 开发诊断；不提供产品结果 |
 
 主进程由 `main::run` 分发。未知命令返回错误并退出失败；没有子命令时只打印 usage 并成功返回。
@@ -69,7 +69,7 @@ Worker stdout 保持 JSONL。普通排班质量问题随已完成 rotation 的 w
 
 ## 自动排班入口
 
-`plan --rotation auto@H1/H2` 通过公共模式/时长请求解析后分派 `plan.rs::auto_rotation_cmd`，只加载输入、调用core并输出排班。支持 `--no-fiammetta`、`--operbox`、`--layout`、`--top`、`--prefer`、`--rotation-out`、`--output-dir`、`--assert-invariants`、`--json`；JSON在显式路径写入（output-dir下为auto_rotation.json），stdout默认中文逐站排班，`--json`时只输出排班JSON。逐站显示主力/替补、普通效率或充能/支援速度/中枢贸易与各制造配方及办公会客加成、窗口、缺额，常驻宿舍挂件单列。拒绝profile、MAA、baseline、prefix shadow和菲亚候选输出；菲亚按静态优先级配置，支持`--no-fiammetta`且gate核对请求开关。宿舍1＋1不受主动支持总开关影响。auto gate在写文件前检查最终两态；缺员是成功的不完整排班。正常工作技能候选在初始建池按对应设施及H1/H2试算，随机Fallback不做心情或技能检查；后续心情不足保留正常结果与质量提示，显式gate核对提示准确性以及身份、Plan和快照。不再证明任意零散成员或主备混搭不存在偶发跨站协同（保证边界见`docs/自动轮换.md` §2.10）。第一次主力完成后固定；合法替补候选耗尽保留真实缺额并输出当前排班，不回选主力或缩短时长。Worker plan_compute仍为定时契约；Check通过此独立CLI入口接自动排班。ping新增`auto_rotation.fiammetta_policy="static_priority"`能力声明，旧bundle未声明时不得静默接收开启请求。MAA未扩展。
+`plan --rotation auto@H1/H2` 通过公共模式/时长请求解析后分派 `plan.rs::auto_rotation_cmd`，只加载输入、调用core并输出排班。支持 `--no-fiammetta`、`--operbox`、`--layout`、`--top`、`--prefer`、`--rotation-out`、`--output-dir`、`--assert-invariants`、`--json`；JSON在显式路径写入（output-dir下为auto_rotation.json），stdout默认中文逐站排班，`--json`时只输出排班JSON。逐站显示主力/替补、普通效率或充能/支援速度/中枢贸易与各制造配方及办公会客加成、窗口、缺额，常驻宿舍挂件单列。拒绝profile、MAA、baseline、prefix shadow和菲亚候选输出；菲亚按既定优先级支持实际目标同房跨主备，输出宿舍及双方心情交换记录，支持`--no-fiammetta`且gate核对请求开关、实际续班、Plan依赖和共享恢复预算。宿舍1＋1不受主动支持总开关影响。auto gate在写文件前检查最终两态；缺员是成功的不完整排班。正常工作技能候选在初始建池按对应设施及H1/H2试算，随机Fallback不做心情或技能检查；后续心情不足保留正常结果与质量提示，显式gate核对提示准确性以及身份、Plan和快照。不再证明任意零散成员或主备混搭不存在偶发跨站协同（保证边界见`docs/排班/自动轮换.md` §2.10）。第一次主力完成后固定；合法替补候选耗尽保留真实缺额并输出当前排班，不回选主力或缩短时长。Worker plan_compute仍为定时契约；Check通过此独立CLI入口接自动排班。ping保留`auto_rotation.fiammetta_policy="static_priority"`顺序能力声明，并增加`continuous_targets=true`及`exchange_cycle=true`实际续班能力，旧bundle未声明时不得静默接收开启请求。MAA未扩展。
 
 自动排班明确输入主力/替补两段时长，裸 `auto` 返回补时长错误；例如 `auto@24/12`。输出 `timing.shift_hours`保存输入，两态的`evaluation_hours`分别为H1/H2，ETA首人只解释可工作时间。CLI模式/时长解析共用core请求，Worker仍只接受既有定时合同。
 
@@ -78,3 +78,10 @@ Worker stdout 保持 JSONL。普通排班质量问题随已完成 rotation 的 w
 ## 本地验收范围（2026-10-31）
 
 最终release以隔离schema17完整表启动Worker，ping和两类v7普通拓扑请求均成功且开启终态断言；返回班时为8/8/8和8/16。未知方法返回单帧错误，EOF进程exit0。证据见`target/codex-runs/main-integration-20261031/worker-final-live/`。138s是含完整表冷加载、与Bake后校验并行的进程总时长，不作为热请求速度。未部署，也未覆盖所有历史schema、所有错误帧或debug rerun。制品以实际SHA关联源码冻结树；嵌入构建commit/时间可能来自Cargo先前缓存，本轮记录实际值，不把它当成当前源码HEAD证明。
+
+2026-11-02按用户裁决暂时关闭运行时Bake：Core默认关闭，CLI各入口固定关闭，serve启动及全部请求不再加载、预热或查表，使用原live搜索。保留 --no-bake 兼容既有调用；显式 bake all/trade/manufacture 仍可生成产物。当前没有运行时启用CLI参数；Worker协议、搜索参数及输出结构保持原契约。
+
+bench --runs N 在同一进程顺序执行N次相同输入，各次独立trace与请求memo；当前运行时Bake关闭，各轮均走live，不加载或复用Bake表。输出文件请求会逐轮写入同一路径，最终保留最后一轮。
+
+
+2026-11-02直接导入旁边RIIC-Web的原生serve-client模拟schema3内联请求：同Worker连续三班/主备各3次，开关响应除耗时一致，当前Box均零Bake命中。开启同步预热超过客户端ping的10秒超时，放宽诊断等待后成功；关闭约57ms握手成功。网站具名rotation、Worker定时v7均未暴露Rust auto，自动验收使用plan --rotation auto@H1/H2。未修改网站或Worker协议/timeout；完整测量与支持边界见docs/质量与维护/PERFORMANCE_ENGINEERING.md。

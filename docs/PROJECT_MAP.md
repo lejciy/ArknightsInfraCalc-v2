@@ -2,7 +2,7 @@
 
 > 文档角色：current-reference
 > 生命周期状态：current
-> 当前真源：docs/文档生命周期.md；docs/ORCHESTRATION_LAYER.md；docs/BASE_ASSIGNMENT.md；docs/INFRA_CLI.md；docs/排班模式.md
+> 当前真源：docs/文档生命周期.md；docs/架构/ORCHESTRATION_LAYER.md；docs/架构/BASE_ASSIGNMENT.md；docs/接入与前端/INFRA_CLI.md；docs/排班/排班模式.md
 > 摘要：提供当前代码、数据和命令 owner 地图
 
 > 本文是当前代码、数据和命令地图，不是每个 Agent 任务的无条件首读。先由 [AGENTS.md](../AGENTS.md) 选择 Skill；只有 owner、入口或调用链不明时才定向读取本文。领域语义见对应 canonical Markdown，文档位置未知时查 [INDEX.md](INDEX.md)。
@@ -12,7 +12,8 @@
 - 查业务规则：从 [INDEX.md](INDEX.md) 进入唯一 canonical，不从本文推导公式或 admission。
 - 查代码 owner、命令入口或调用链：按本文对应表格定位，不要求通读。
 - 查实现状态：以当前代码和生成 help 为准；本文只维护稳定 owner，不复制完整 wire schema、fixture 真值表或 top hit。
-- 查历史方案：进入 `docs/ARCHIVE/`；开放工作只看已由当前任务恢复的 `docs/TODO/`。
+- 查历史方案：进入[历史归档](ARCHIVE/README.md)；开放工作只看[开放工作总板](TODO/README.md)。
+- 查本轮质量反馈与bug修复进度：[近期质量反馈修复记录](TODO/详情/性能质量/近期质量反馈修复记录-20261107.md)；本文不维护逐项状态和验证历史。
 - 按症状定位完整影响链：先查 [生成 Agent 路由](生成索引/Agent路由.md)，再进入 `docs/调用链/` 和对应 `docs/模块/`；本文只保留稳定 owner，不复制调用链正文。
 
 ## Workspace Owner
@@ -20,7 +21,7 @@
 | 路径 | 单一职责 | 深读入口 |
 |---|---|---|
 | `crates/infra-core/` | 机制解释、候选、搜索、编排、排班与导出数据结构 | 本文 core/layout 表和各领域 canonical |
-| `crates/infra-cli/` | argv/wire adapter、文件加载、调用编排和忠实输出；不写机制或重新选型 | [INFRA_CLI.md](INFRA_CLI.md) |
+| `crates/infra-cli/` | argv/wire adapter、文件加载、调用编排和忠实输出；不写机制或重新选型 | [INFRA_CLI.md](接入与前端/INFRA_CLI.md) |
 | `data/` | 运行时表、规则载体、fixture 和参考快照；不裁决业务语义 | 本文 data 表 |
 | `scripts/` | 数据构建、导入、审计、发布和证据工具 | 本文工具表；证据协议见 [scripts/codex/README.md](../scripts/codex/README.md) |
 | `release/` | 发布包配置、生成器和发布夹具 | [release/README.md](../release/README.md) |
@@ -97,7 +98,7 @@ layout / operbox / runtime data
 | `layout/assign/commit.rs` | assignment 提交和 `used` 同步 |
 | `layout/assign/{control_fill,producer_fill,power_fill,trade_fill,manufacture_fill,team_fill}.rs` | 各设施或队伍的实际填房 owner |
 | `layout/orchestrate/rules.rs` | 声明式 Rule gate/role/relation 编译器 |
-| `layout/orchestrate/select.rs` | 高优先 Rule、legacy registry、late competitive Rule 汇合并生成 Plan |
+| `layout/orchestrate/select.rs` | 高优先 Rule、legacy registry、late 挂件 Rule 汇合并生成 Plan |
 | `layout/orchestrate/plan.rs` | 已解析 `AssignmentPlan`、anchor、bind、dependency 和 reserve |
 | `layout/orchestrate/execute.rs` | 执行已解析 placement；不按 system/rule id 重判 |
 | `layout/resolve.rs` | 蓝图 + assignment -> workforce、全局资源、注入和 resolved rooms |
@@ -119,7 +120,7 @@ layout / operbox / runtime data
 
 ## `infra-cli` 命令
 
-该首表由 `scripts/codex/check_repository_facts.py` 与顶层 dispatch、`layout` 子命令集合对账。详细参数和输出契约见 [INFRA_CLI.md](INFRA_CLI.md) 与前端文档。
+该首表由 `scripts/codex/check_repository_facts.py` 与顶层 dispatch、`layout` 子命令集合对账。详细参数和输出契约见 [INFRA_CLI.md](接入与前端/INFRA_CLI.md) 与前端文档。
 
 | 命令 | 用途 |
 |---|---|
@@ -130,7 +131,7 @@ layout / operbox / runtime data
 | `search trade [--top N]` | 贸易候选搜索 |
 | `trade yield <fixture>` | 单站单位产出探测 |
 | `bench --operbox <path>` | 固定布局的贸易/制造搜索基准 |
-| `bake [all\|trade\|manufacture]` / `bake validate` / `bake verify` | 生成、兼容校验和响应验证 Bake catalog |
+| `bake [all\|trade\|manufacture]` | 生成并发布 Bake catalog；不执行校验 |
 | `debug rerun --bundle <path>` | 重放反馈 debug bundle，并可按房间、干员或班次缩小输出 |
 | `serve` | 启动前端 JSON line 常驻 worker；机器主入口为内联 `plan.compute` |
 | `layout test` | 自定义蓝图的单班搜索或指定 assignment 探测 |
@@ -149,16 +150,16 @@ layout / operbox / runtime data
 | `src/commands/serve.rs` | `plan.compute` 内联协议和 legacy 路径适配 |
 | `src/commands/layout.rs` | `layout test` / `team-rotation` / `analyze` / `eval` adapter |
 | `src/commands/advice.rs` | v2 练卡规则和 operbox adapter |
-| `src/commands/bake.rs` | Bake 生成、validate 和 verify adapter |
+| `src/commands/bake.rs` | Bake 生成与发布 adapter |
 | `src/commands/debug.rs` | debug bundle 校验、重放和诊断输出 adapter |
 | `src/commands/profile.rs` | layout、analysis 和 Bake dependency profile |
 | `src/commands/verify.rs` | `expect_rule_id` 回归断言和 fixture 选择 |
 | `src/verify/{cases,fixtures}.rs` | CSV case 加载与硬编码最小房间 fixture |
 | `src/output.rs` | CSV/text/JSON 格式化；不求解或重排候选 |
 
-仓库标准 243 fixture 位于 `data/fixtures/243/{layout.json,operbox_full_e2.json,schedule_export.json}`。用户说“跑一遍模拟”时默认使用 `plan`；只需排班时使用 `layout team-rotation`，具体命令见 [Debug 指南](MAINTENANCE_MODE.md#22-复现入口)。
+仓库标准 243 fixture 位于 `data/fixtures/243/{layout.json,operbox_full_e2.json,schedule_export.json}`。用户说“跑一遍模拟”时默认使用 `plan`；只需排班时使用 `layout team-rotation`，具体命令见 [Debug 指南](质量与维护/MAINTENANCE_MODE.md#22-复现入口)。
 
-前端与发布路径：[FRONTEND_CLI.md](FRONTEND_CLI.md)、[FRONTEND_SERVE_GUIDE.md](FRONTEND_SERVE_GUIDE.md)、[release/README.md](../release/README.md)。Next BFF 使用 `serve` / `plan.compute`；一次性调用使用 `plan` / `--maa-out`。
+前端与发布路径：[FRONTEND_CLI.md](接入与前端/FRONTEND_CLI.md)、[FRONTEND_SERVE_GUIDE.md](接入与前端/FRONTEND_SERVE_GUIDE.md)、[release/README.md](../release/README.md)。Next BFF 使用 `serve` / `plan.compute`；一次性调用使用 `plan` / `--maa-out`。
 
 ## `data/` Owner
 
@@ -179,7 +180,7 @@ layout / operbox / runtime data
 | `REGRESSION_CASES.csv` / `UNIT_OUTPUT_ANCHORS.csv` | `verify` 回归和单位产出锚点 |
 | `fixtures/` / `layout/` / `schedule_243/` | 真实入口 fixture、蓝图模板和排班样例 |
 | `tags/` | Selector/规则使用的阵营与结构 tag |
-| `baked/` | 本地 Bake catalog；schema/输入不兼容时必须拒绝并走 live 路径 |
+| `baked/` | 本地 Bake catalog；信任本地表，运行时不校验指纹或完整性；更新后显式重建 |
 | `feedback_regression_seeds/` | 从反馈提炼的回归种子，不拥有领域语义 |
 | `prts_*` / `MECHANICS_REGISTRY.csv` | 外部原文快照和历史归档核对材料 |
 
@@ -215,17 +216,17 @@ layout / operbox / runtime data
 
 | 已选定的任务范围 | 先看 | 实现 owner |
 |---|---|---|
-| EffectAtom/L1 机制 | [EFFECT_ATOM_DESIGN.md](EFFECT_ATOM_DESIGN.md) | `types.rs`、对应 interpreter、skill/instance 数据 |
+| EffectAtom/L1 机制 | [EFFECT_ATOM_DESIGN.md](机制/EFFECT_ATOM_DESIGN.md) | `types.rs`、对应 interpreter、skill/instance 数据 |
 | 贸易 L2/L3 | [INTERNAL/TRADE_INTERPRETER.md](INTERNAL/TRADE_INTERPRETER.md)、[INTERNAL/SHORTCUT_MATCHING.md](INTERNAL/SHORTCUT_MATCHING.md) | `trade/{gold_flow,order_mechanic,shortcut,segment}.rs` |
-| 制造 full_pool / standalone 与填房 | [MANUFACTURE_STATUS.md](MANUFACTURE_STATUS.md)、[PERFORMANCE_ENGINEERING.md](PERFORMANCE_ENGINEERING.md) | `layout/assign/manufacture_fill.rs::manu_options` 设置排班 `full_pool=true`；`search/manufacture.rs::search_manufacture_single_recipe` 只在 `false` 应用 standalone；体系 required 路径见 `layout/orchestrate/rules.rs`，Bake gate 见 `bake.rs` |
-| 中枢求值 / 普通补位 | [CONTROL_CENTER_ASSIGNMENT.md](CONTROL_CENTER_ASSIGNMENT.md) | `control/`、`search/control.rs` |
-| 动态 producer admission / 依赖 / 同班 | [CONTROL_CENTER_ASSIGNMENT.md](CONTROL_CENTER_ASSIGNMENT.md)、[SCHEDULE_ROTATION.md](SCHEDULE_ROTATION.md) | `data/producer_rules.json` 声明 admission/target/relation → `response_dependency.rs` 加载并规范化依赖 → `layout/assign/pipeline.rs` / `layout/orchestrate/plan.rs` 产出事实 → `schedule/shift_bind.rs` 消费 |
-| 办公室/会客室静态求值与出口 | [EFFECT_ATOM_DESIGN.md](EFFECT_ATOM_DESIGN.md)、[FRONTEND_CLI.md](FRONTEND_CLI.md) | 当前 `support_facility.rs` → `layout/resolve.rs` → `commands/layout.rs::layout_eval_cmd`；未实现的 `plan.compute` 扩展点是 `schedule/rotation_types.rs::TeamShiftResult` → `commands/serve.rs::RotationShiftSummary` |
-| 单班 Plan/填房 | [ORCHESTRATION_LAYER.md](ORCHESTRATION_LAYER.md)、[BASE_ASSIGNMENT.md](BASE_ASSIGNMENT.md) | `layout/orchestrate/`、`layout/assign/` |
-| timed rotation/MAA | [排班模式](排班模式.md)、[SCHEDULE_ROTATION.md](SCHEDULE_ROTATION.md)、[排班职责地图](模块/排班职责地图.md) | `schedule/team_rotation.rs` 调度；`rotation_types.rs` 公共报告；`rotation_scoring.rs` 菲亚后的普通班次重算；`shift_bind.rs`、`cycle_mood.rs`、`dorm_finalizer.rs` 分别负责绑定、周期心情、宿舍；`export/maa.rs` 只投影 |
-| argv/Worker Plan 汇合 | [INFRA_CLI.md](INFRA_CLI.md) | `commands/{plan,plan_compute,serve}.rs` |
-| 练卡推荐 | [练卡推荐相关](练卡推荐相关/README.md) | `training_advice/`、`commands/advice.rs`；旧 `training_recommendations.json` 仅 diagnose |
-| Bake/性能 | [PERFORMANCE_ENGINEERING.md](PERFORMANCE_ENGINEERING.md) | `bake.rs`、`pool/standalone.rs`、`commands/{bake,profile}.rs` |
+| 制造 full_pool / standalone 与填房 | [MANUFACTURE_STATUS.md](机制/MANUFACTURE_STATUS.md)、[PERFORMANCE_ENGINEERING.md](质量与维护/PERFORMANCE_ENGINEERING.md) | `layout/assign/manufacture_fill.rs::manu_options` 设置排班 `full_pool=true`；`search/manufacture.rs::search_manufacture_single_recipe` 只在 `false` 应用 standalone；体系 required 路径见 `layout/orchestrate/rules.rs`，Bake gate 见 `bake.rs` |
+| 中枢求值 / 普通补位 | [CONTROL_CENTER_ASSIGNMENT.md](机制/CONTROL_CENTER_ASSIGNMENT.md) | `control/`、`search/control.rs` |
+| 动态 producer admission / 依赖 / 同班 | [CONTROL_CENTER_ASSIGNMENT.md](机制/CONTROL_CENTER_ASSIGNMENT.md)、[SCHEDULE_ROTATION.md](排班/SCHEDULE_ROTATION.md) | `data/producer_rules.json` 声明 admission/target/relation → `response_dependency.rs` 加载并规范化依赖 → `layout/assign/pipeline.rs` / `layout/orchestrate/plan.rs` 产出事实 → `schedule/shift_bind.rs` 消费 |
+| 办公室/会客室静态求值与出口 | [EFFECT_ATOM_DESIGN.md](机制/EFFECT_ATOM_DESIGN.md)、[FRONTEND_CLI.md](接入与前端/FRONTEND_CLI.md) | 当前 `support_facility.rs` → `layout/resolve.rs` → `commands/layout.rs::layout_eval_cmd`；未实现的 `plan.compute` 扩展点是 `schedule/rotation_types.rs::TeamShiftResult` → `commands/serve.rs::RotationShiftSummary` |
+| 单班 Plan/填房 | [ORCHESTRATION_LAYER.md](架构/ORCHESTRATION_LAYER.md)、[BASE_ASSIGNMENT.md](架构/BASE_ASSIGNMENT.md) | `layout/orchestrate/`、`layout/assign/` |
+| timed rotation/MAA | [排班模式](排班/排班模式.md)、[SCHEDULE_ROTATION.md](排班/SCHEDULE_ROTATION.md)、[排班职责地图](模块/排班职责地图.md) | `schedule/team_rotation.rs` 调度；`rotation_types.rs` 公共报告；`rotation_scoring.rs` 菲亚后的普通班次重算；`shift_bind.rs`、`cycle_mood.rs`、`dorm_finalizer.rs` 分别负责绑定、周期心情、宿舍；`export/maa.rs` 只投影 |
+| argv/Worker Plan 汇合 | [INFRA_CLI.md](接入与前端/INFRA_CLI.md) | `commands/{plan,plan_compute,serve}.rs` |
+| 练卡推荐 | [练卡推荐相关](产品与训练/README.md) | `training_advice/`、`commands/advice.rs`；旧 `training_recommendations.json` 仅 diagnose |
+| Bake/性能 | [PERFORMANCE_ENGINEERING.md](质量与维护/PERFORMANCE_ENGINEERING.md) | `bake.rs`、`pool/standalone.rs`、`commands/{bake,profile}.rs` |
 | 文档角色/关闭任务 | [文档生命周期](文档生命周期.md) | `docs_inventory.py` 与 generated INDEX/TODO regions |
 
 ## 渐进式读取边界

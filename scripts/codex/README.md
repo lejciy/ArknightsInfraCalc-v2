@@ -17,7 +17,7 @@ python3 scripts/codex/query_project_knowledge.py --id <返回ID> --parent --full
 python3 scripts/codex/query_project_knowledge.py --check
 ```
 
-本地关键词、Markdown父段与Rust声明导航，默认排除历史/提案，`--history`显式纳入；不是embedding语义检索。返回原文、owner、hash、HEAD、dirty、历史身份与完整回取，不裁决业务。详见[Agent知识库](../../docs/Agent知识库.md)、[检查与删减导航](../../docs/检查与删减导航.md)。源码声明是正则导航，不能证明AST或真实调用。缓存放target，hash改变按文件更新；文档/源码同时变化时查询会要求重读。
+本地关键词、Markdown父段与Rust声明导航，默认排除历史/提案，`--history`显式纳入；不是embedding语义检索。返回原文、owner、hash、HEAD、dirty、历史身份与完整回取，不裁决业务。详见[Agent知识库](../../docs/指南/Agent知识库.md)、[检查与删减导航](../../docs/指南/检查与删减导航.md)。源码声明是正则导航，不能证明AST或真实调用。缓存放target，hash改变按文件更新；文档/源码同时变化时查询会要求重读。
 
 ### 排班报告
 
@@ -46,6 +46,33 @@ python3 scripts/codex/query_runtime_data.py --shortcut gsl_docus_syracusa
 只加载显式 catalog：operator instances、skill table、orchestration rules、legacy systems、producer rules、trade shortcuts/segments。不遍历 fixtures、Bake、feedback。默认数据目录来自脚本所属工作树，可用 `--data-dir` 指定另一工作树。
 
 输出原始记录、来源字段和 JSON Pointer，关联精确相同的字符串值/键；干员查询另外附原始绑定的 skill 记录。不会用描述中的子串推断依赖，不合并 tier/stepwise，不重算效率或判断准入。`buff_ids_not_in_skill_table` 只是“该 ID 未收录”的事实，不能单独判断技能错误。缺 catalog、错误容器或重复记录 ID 明确报错。
+
+### 上游基建技能缺失角色
+
+一键下载并比对（只写新证据目录）：
+
+使用 Python 3.9+ 与 curl，默认经本地 7890 代理直接请求 GitHub raw，不依赖 GitHub API。
+
+```bash
+python3 scripts/codex/check_upstream_building_skills.py
+python3 scripts/codex/check_upstream_building_skills.py --ref 0f5efc6352337e2d63f81c0d2ca6d469b2ce3d96 --facility MANUFACTURE
+```
+
+默认来源 yuanyan3060/ArknightsGameResource 的 main，按有价值技能筛选；--all-skills 关闭筛选，--repo Kengxxiao/ArknightsGameData 切换已登记来源，--proxy '' 直连，--data-dir 指定本地运行时目录。--output-dir 必须是 out/ 或 target/codex-runs/ 内的新子目录，拒绝覆盖。每个下载默认最多60秒，可用 --timeout 调整到1–300秒；失败后停止，不重试其他来源，不沿用旧文件。
+
+输出 building_data.json、character_table.json、原样提取的 building_skills.json、source.json、comparison.json 与“缺失干员与技能.md”。source 保存请求ref、下载URL、SHA-256及 completed/failed 状态；分支ref记为 unresolved_ref，不冒充同提交下载，完整40位提交格式ref记为 commit_ref_unverified（requested_commit保留输入，commit为空，不独立解析提交身份）。名册一致仅证明结构完整，不证明分支下载的版本一致；需要固定版本时显式传SHA。已有目录或下载/JSON/比对异常非零退出，失败目录保留来源和错误；完整报告仅在成功后生成。结果分列全部缺实例、缺实例角色范围内技能、已有角色原始技能ID差集。它不自动证明已有ID的绑定正确、别名或委托覆盖，后续实际覆盖核对仍由技能流程完成。
+
+下载固定提交的 building_data.json 与同提交 character_table.json 后运行：
+
+```bash
+python3 scripts/codex/report_missing_building_skills.py --building out/building-skills/<版本>/building_data.json --characters out/building-skills/<版本>/character_table.json
+```
+
+默认比较本工作树 data/skill_table.json 的精确 buff ID，逐角色输出未收录技能、设施、名称和 ID；另按 data/operator_instances.json 的姓名标记实例缺失。可用 --facility MANUFACTURE（可重复）筛选上游 roomType，--json 输出包含技能原文和解锁条件的完整 JSON。缺失是事实清单，不证明机制漏实现；不转换自定义 buff ID、不判定委托、不修改运行时数据。成功（含无差集）返回 0，读取或结构错误非零退出。产物保存在 out/，不提交。
+
+加 --valuable 按用户 2026-11-03 的展示口径排除加工站、专精室（含中枢仅提升专精速度）及中枢以外纯心情加成，并附技能原文。心情互换、感知信息转化和中枢心情技能保留。非设施类排除只匹配 building_skill_exclusions.json 已复核的 buff ID、设施和原文 SHA-256；新 ID、原文或设施变化默认保留给用户，不证明技能已建模或可直接进池。纯效率、暖机、挂件和组合角色按现有代码及规范流程处理；其他类型只展示原文，不展开机制分析。
+
+线索倾向也忽略：仅改变线索类型、概率或必得线索的技能排除；兼有速度加成的保留。会客室两两枚举求效率，组合技能复用现有流程。筛选不修改原始描述。脚本先核对角色表可获得的八职业干员集合与基建表 chars 完全一致，不一致非零退出；全部缺失实例在技能筛选前独立计算，始终输出 all_missing_instances、missing_operator_skills_in_scope（缺实例角色的全部范围内技能，不依赖技能表是否缺 ID）和名册 coverage，防止将筛选外角色误当作不存在。重复 JSON 键、重名干员、空技能关联或未知上游 buff 均非零退出，不静默覆盖或跳过。
 
 ### 调查报告与用户原话
 
@@ -116,16 +143,31 @@ python3 scripts/assert_rotation_invariants.py \
 
 ## 完成检查
 
+### 文档信息架构与生成导航
+
+文档入口按“问题 → 当前 owner → 代码/证据”组织：[文档总入口](../../docs/INDEX.md) 提供症状、七个主题领域、代码/协议、活动和历史路径；七个主题目录的 `README.md` 是领域入口，`docs/TODO/README.md` 汇总五个工作流，具体活动只放在 `docs/TODO/详情/<工作流>/`。不确定领域时先查生成的 Agent 路由，已知代码入口时查 `docs/PROJECT_MAP.md`，仍无法定位时才浏览全量文档目录。
+
+新增或关闭详情页时先修改页面正文和元数据，再由确定性生成器维护所有列表。`--write-indexes` 会先校验页面结构，再重建 canonical、ADR、五个工作流、tracker、领域目录和全量目录；`--check` 随后验证每个详情由对应 tracker 恰好链接一次，并检查所有生成区段无漂移。这样新增详情不会因为 tracker 尚未更新而阻塞首次生成。
+
 ```bash
+python3 scripts/codex/docs_inventory.py --write-indexes
+python3 scripts/codex/generate_agent_index.py
 python3 scripts/codex/docs_inventory.py --check
+python3 scripts/codex/generate_agent_index.py --check
 python3 scripts/codex/check_repository_facts.py
+python3 scripts/codex/query_project_knowledge.py --check --no-cache
+```
+
+不要把生成表复制回正文，也不要让 tracker 重写详情的状态和边界。身份、角色、工作流归属和摘要仍由详情元数据拥有；生成器只负责让人和 Agent 能从总板、领域入口与全量目录到达同一页面。
+
+```bash
 scripts/codex/check_task_scope.py --manifest target/codex-runs/<task>/manifest.json
 scripts/codex/render_evidence.py \
   --manifest target/codex-runs/<task>/manifest.json \
   --output target/codex-runs/<task>/reports/evidence.md
 ```
 
-`docs_inventory.py` 统一解析 [文档生命周期](../../docs/文档生命周期.md) 元数据，检查角色/状态/路径矩阵、唯一领域 owner、结构化页的代码锚点和关联链路。`generate_agent_index.py` 从 route registry、Rust 公共模块和 CLI dispatch 生成 Agent 路由与代码地图；`check_repository_facts.py` 再检查稳定 Markdown 链接、feedback ledger、CLI 命令地图和当前模块事实。生成器不把符号存在性冒充调用语义证明；跨层行为变更仍由作者声明触点并人工复核。
+`docs_inventory.py` 统一解析 [文档生命周期](../../docs/文档生命周期.md) 元数据，检查角色/状态/路径矩阵、唯一领域 owner、TODO 目录结构、结构化页的代码锚点和关联链路。`generate_agent_index.py` 从 route registry、Rust 公共模块和 CLI dispatch 生成 Agent 路由与代码地图；`check_repository_facts.py` 再检查当前 Markdown 的路径和章节锚点、feedback ledger、CLI 命令地图和当前模块事实。生成器不把符号存在性冒充调用语义证明；跨层行为变更仍由作者声明触点并人工复核。
 
 `check_task_scope.py` 检查实际 changed paths 是否属于 `change_scope`、带理由的 scope expansion 或证明路径；文档路径和其他消费者一样显式声明。显式 deferred 路径和 deferred side finding 被修改时硬失败。完成检查还要求 reviewer 登记最终不变量、精确 changed paths 和全部 expansion id。
 

@@ -698,15 +698,16 @@ fn effective_dorm_occupants(blueprint: &BaseBlueprint, _assignment: &BaseAssignm
 /// 通用扣回：对本房干员中 scope=Global 的 StateProduce atom 做扣回。
 /// 编排层已统一执行这些 atom 并将结果写入 `layout.global`。
 /// Per-room 求解时相同 atom 会再次执行，故须扣回编排层已计数的分量。
-fn deduct_room_global_atoms<'a, I>(
+pub(crate) fn deduct_room_global_atoms<I>(
     room_layout: &mut LayoutContext,
     compiled_atoms_iter: I,
     layout: &LayoutContext,
 ) where
-    I: IntoIterator<Item = &'a Arc<[CompiledAtom]>>,
+    I: IntoIterator,
+    I::Item: AsRef<[CompiledAtom]>,
 {
     for atoms in compiled_atoms_iter {
-        for ca in atoms.iter() {
+        for ca in atoms.as_ref() {
             if ca.atom.scope != AtomScope::Global {
                 continue;
             }
@@ -901,6 +902,7 @@ fn to_power_operator(
 ) -> Result<PowerOperator> {
     let buff_ids = resolve_buff_ids(instances, op, "power")?;
     let mut power = PowerOperator::new(op.name.clone(), op.elite, buff_ids);
+    power.tags = instance_tags(instances, &op.name, op.tier());
     power.work_mood = op.work_mood.map(f64::from);
     Ok(power)
 }

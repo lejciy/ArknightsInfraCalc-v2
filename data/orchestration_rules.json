@@ -2,6 +2,32 @@
   "version": 1,
   "rules": [
     {
+      "id": "recycle_skilled",
+      "priority": 14,
+      "tier": "cross_station",
+      "alternatives": [
+        {
+          "id": "recycle_skill_priority",
+          "roles": [
+            {
+              "id": "recycle_workers",
+              "facility": "recycle",
+              "candidates": [
+                { "name": "国度", "elite": 0 },
+                { "name": "旅骨", "elite": 0 },
+                { "name": "行铃", "elite": 0 }
+              ],
+              "min_count": 1,
+              "max_count": 2,
+              "same_room": true,
+              "selection": "recycle_objective"
+            }
+          ],
+          "bind_all": true
+        }
+      ]
+    },
+    {
       "id": "mujica_fallback",
       "priority": -10,
       "tier": "cross_station",
@@ -772,14 +798,12 @@
               "facility": "factory",
               "recipe": "gold",
               "candidates": [{ "name": "娜斯提", "elite": 2 }],
-              "fill_to_capacity": true,
-              "competitive": true
+              "fill_to_capacity": true
             },
             {
               "id": "muelsyse",
               "facility": "power_plant",
-              "candidates": [{ "name": "缪尔赛思", "elite": 2 }],
-              "competitive": true
+              "candidates": [{ "name": "缪尔赛思", "elite": 2 }]
             },
             {
               "id": "rhine_support",
@@ -791,7 +815,7 @@
               "min_count": 1,
               "max_count": 4,
               "selection": "ordered",
-              "one_per_room": true
+              "one_per_room": false
             }
           ],
           "active_dependencies": [
@@ -810,8 +834,7 @@
               "facility": "factory",
               "recipe": "gold",
               "candidates": [{ "name": "娜斯提", "elite": 2 }],
-              "fill_to_capacity": true,
-              "competitive": true
+              "fill_to_capacity": true
             },
             {
               "id": "rhine_support",
@@ -823,7 +846,7 @@
               "min_count": 1,
               "max_count": 4,
               "selection": "ordered",
-              "one_per_room": true
+              "one_per_room": false
             }
           ],
           "active_dependencies": [
@@ -840,8 +863,7 @@
             {
               "id": "muelsyse",
               "facility": "power_plant",
-              "candidates": [{ "name": "缪尔赛思", "elite": 2 }],
-              "competitive": true
+              "candidates": [{ "name": "缪尔赛思", "elite": 2 }]
             },
             {
               "id": "rhine_support",
@@ -853,7 +875,7 @@
               "min_count": 1,
               "max_count": 5,
               "selection": "ordered",
-              "one_per_room": true
+              "one_per_room": false
             }
           ],
           "active_dependencies": [
@@ -896,7 +918,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],
@@ -943,7 +964,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],
@@ -983,7 +1003,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],
@@ -1022,8 +1041,7 @@
                   "elite": 2
                 }
               ],
-              "fill_to_capacity": true,
-              "competitive": true
+              "fill_to_capacity": true
             }
           ],
           "active_dependencies": [
@@ -1061,8 +1079,7 @@
                   "elite": 2
                 }
               ],
-              "fill_to_capacity": true,
-              "competitive": true
+              "fill_to_capacity": true
             }
           ],
           "active_dependencies": [
@@ -1108,7 +1125,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],
@@ -1147,8 +1163,7 @@
                   "elite": 2
                 }
               ],
-              "fill_to_capacity": true,
-              "competitive": true
+              "fill_to_capacity": true
             }
           ],
           "active_dependencies": [
@@ -1194,7 +1209,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],
@@ -1234,7 +1248,6 @@
                 }
               ],
               "fill_to_capacity": true,
-              "competitive": true,
               "trade_order": "gold"
             }
           ],

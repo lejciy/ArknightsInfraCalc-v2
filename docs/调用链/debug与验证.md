@@ -3,7 +3,7 @@
 > 文档角色：current-reference
 > 生命周期状态：current
 > 当前真源：docs/接口/错误与诊断.md
-> 机制依赖：docs/知识库引用.md；vault:docs/1-基础设定/README.md
+> 机制依赖：docs/机制/知识库引用.md；vault:docs/1-基础设定/README.md
 > 摘要：按错误症状选择复现、固定编制解释、生产 bundle 重跑和回归入口
 > 代码范围：`crates/infra-cli/src/commands/{debug.rs,verify.rs,layout.rs,profile.rs}`、`crates/infra-core/src/{layout,trade,manufacture,schedule,bake}`
 > 代码锚点：`crates/infra-cli/src/commands/debug.rs::rerun_cmd`; `crates/infra-cli/src/commands/layout.rs::layout_eval_cmd`; `crates/infra-cli/src/commands/verify.rs::verify_cmd`; `crates/infra-cli/src/commands/verify.rs::run_regressions`; `crates/infra-core/src/schedule/team_rotation.rs::assert_final_rotation_invariants`
@@ -18,7 +18,7 @@
 | 已知某个 assignment 的效率/注入错误 | `layout eval --explain-json` | 已选编制如何结算；不解释未选候选为何落败 |
 | 某个 trade shortcut 或单位产出错误 | `verify --case <id>` / `trade yield <fixture>` | CSV 期望与正式 trade solver 的回归结果 |
 | 轮换、容量、bind、最终状态错误 | `plan --assert-invariants` | 当前 Plan 入口和最终 rotation invariant；`layout team-rotation` 不解析此开关 |
-| 搜索慢或 bake 可疑 | `profile ...`、`bake validate`、`bake verify` | 阶段耗时、catalog 结构和 live response 对账 |
+| 搜索慢或 bake 可疑 | `profile ...`、真实 live/Bake CLI 对比 | 阶段耗时和结果差分；Bake 不再自动校验 |
 
 ## `debug rerun`
 

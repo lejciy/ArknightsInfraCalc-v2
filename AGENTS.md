@@ -23,7 +23,7 @@
 
 1. 用户和其他 writer 的既有改动不覆盖、不清理、不 stash、不混入本任务提交。开始和结束都看 `git status --short`。
 2. 不做 destructive git：`reset --hard`、force push、amend、rebase、丢弃改动的 checkout、`clean`。只 stage 本任务的显式路径，不用 `git add .`。
-3. 项目按单人线性方式维护。除非用户在当前指令中明确要求创建或切换分支/worktree，任何 agent 不得使用 `git branch`、`git switch -c`、`git checkout -b`、`git worktree add` 或其他方式新建分支/worktree。所有写入都在用户指定的当前分支和当前工作树串行完成；子代理默认只读，不并行写共享工作区，也不得为了调查、隔离、交接或并行收益自行创建分支/worktree。 固定工作目录为 `/home/knightcode/Projects/ArknightsInfraCalc-v2-remote-61.184.13.127`；不得改到另一个 checkout 继续任务。
+3. 项目按单人线性方式维护。除非用户在当前指令中明确要求创建或切换分支/worktree，任何 agent 不得使用 `git branch`、`git switch -c`、`git checkout -b`、`git worktree add` 或其他方式新建分支/worktree。所有写入都在用户指定的当前分支和当前工作树串行完成；子代理默认只读，不并行写共享工作区，也不得为了调查、隔离、交接或并行收益自行创建分支/worktree。 容器开发的固定工作目录为 `/workspace`（Docker 命名卷 `arknights-v2-source`）；旧 Ubuntu 目录 `/home/knightcode/Projects/ArknightsInfraCalc-v2-remote-61.184.13.127` 仅保留为迁移源，不返回该目录继续开发。不得改到另一个 checkout 继续任务。
 4. 分层边界：L1 interpreter 只认 `buff_id`，不认干员名；L3 shortcut 只结算实际组合，不负责选型或进编；CLI / export 只编排调用和忠实输出，不写机制、公式，也不重新决策。生产搜索使用各域具名目标，多目标优先显式词典序，中枢或 global heuristic 必须具名。
 5. Layout 主路径是 `build_plan -> execute_plan -> fill -> resolve`，排班不绕过 Plan 修 admission。`shift_bind`、tag、priority、shortcut 只消费各自语义，不能代替 required admission。
 6. 不为单一 operbox、room id、Shift 下标、fixture 或当前 top hit 写补偿特判。
@@ -49,11 +49,11 @@
 - **修在哪**：改最早放行错误状态的那个 owner，不在下游补偿。owner 已经能表达规则时直接局部修，不要求先做架构准备。
 - **体系或结构性改写**（现有模型表达不了已确认的不变量，或多个阶段在重复兜底）：先简述领域不变量、首次违规的位置、修复后唯一的责任边界，以及要删掉的冲突路径。完成时旧的过渡路径和兼容分支一并删掉。
 - **范围**：一个写入单元只有一个主要意图，旁支发现记下来延后处理。修 bug 时发现的"代码可以更干净"另起任务，不借 bug 扩大范围；改变能力、可行行为、policy 或输出口径的，按新功能对待。没有用户恢复授权时，不推进无关的历史 TODO、Mower 动态换班或全基建连续心情最优化。
-- **验证**：按风险匹配。实现闭环后跑一轮完整验证包；失败时先改完，再整轮重跑，不拿反复编译代替调查。项目不新增、保留或运行源码单元/集成测试（含 Rust 测试模块及 Python unittest）；既有源码测试删除。选人、排班、导出类的大改动靠 §2.1-9 的终态断言加批量 box；局部修复用最小反例、相邻反例和真实入口检查，改候选或搜索时同时检查进入和被排除两侧。只改单个房间的计算或只改文档时，可以不跑 §2.1-9 的整体自检，但要在报告里说明原因。复现入口不清时查 `docs/MAINTENANCE_MODE.md` 对应章节。
+- **验证**：按风险匹配。实现闭环后跑一轮完整验证包；失败时先改完，再整轮重跑，不拿反复编译代替调查。项目不新增、保留或运行源码单元/集成测试（含 Rust 测试模块及 Python unittest）；既有源码测试删除。选人、排班、导出类的大改动靠 §2.1-9 的终态断言加批量 box；局部修复用最小反例、相邻反例和真实入口检查，改候选或搜索时同时检查进入和被排除两侧。只改单个房间的计算或只改文档时，可以不跑 §2.1-9 的整体自检，但要在报告里说明原因。复现入口不清时查 `docs/质量与维护/MAINTENANCE_MODE.md` 对应章节。
 - **复审**：中高风险的选人、排班、导出或跨模块改动，整个功能完成后用 `arknights-intent-review`。复审只查三件事：是否照用户的想法改、实现是否干净、耦合代码依赖的条件是否还成立。“干净”指责任清楚、无重复兜底和无关改动，不以审美偏好增加抽象或扩大重构。准绳是用户原话和改动前的裁决，不是本次刚改的文档。主 agent 不自己复审，也不重复验收；每条发现必须落到已修复、有证据驳回或交给用户之一。
 - **提交**：授权的修复验证通过后，主动做原子提交。标题用中文，因为会显示在质量网页上。提交前看 `git status --short`、`git diff`、`git log --oneline -10`。
 - **文档**：改动涉及入口、状态写入、分支或 fallback、错误、输出、机制映射或保证等级时，在同一个变更里更新对应的 owner 文档并跑文档检查；纯内部重构写一句“已复核，无需修改”。新的人读文档用中文文件名。
-- **长任务**：用户授权持续推进时，一个回合结束不等于任务结束；推进以已约定的完成条件为界，不自动扩展旁支。把已核实的事实、剩余范围和下一步写进对应的 active-change 文档，不依赖用户答案的工作继续做。重复失败不再提供新证据时先复核假设，不无界重试；无人值守的暂停和重试上限按 `docs/QUALITY_AND_AUDIT.md` §2.3。所有实施继续在v2当前目录与分支完成；不为任务转移到其他checkout。
+- **长任务**：用户授权持续推进时，一个回合结束不等于任务结束；推进以已约定的完成条件为界，不自动扩展旁支。把已核实的事实、剩余范围和下一步写进对应的 active-change 文档，不依赖用户答案的工作继续做。重复失败不再提供新证据时先复核假设，不无界重试；无人值守的暂停和重试上限按 `docs/质量与维护/QUALITY_AND_AUDIT.md` §2.3。所有实施继续在v2当前目录与分支完成；不为任务转移到其他checkout。
 - **交付说明**：写清改了哪些路径、文档影响、延后的发现、跑过哪类验证、哪些风险没有验证、commit，以及工作区剩余状态。
 
 ### 2.3 先问再做
@@ -67,7 +67,7 @@
 
 ## 3. 环境与命令
 
-- 生产构建、批量 box 求解和 `--assert-invariants` 验收一律用 release 构建：`cargo build --release -p infra-cli`、`target/release/infra-cli`。批量脚本默认指向 `target/debug/infra-cli` 时，用 `--binary target/release/infra-cli` 覆盖。
+- 生产构建、批量 box 求解和 `--assert-invariants` 验收一律用 release 构建：`cargo build --release -p infra-cli`、`$CARGO_TARGET_DIR/release/infra-cli`。批量脚本默认指向 `target/debug/infra-cli` 时，用 `--binary "$CARGO_TARGET_DIR/release/infra-cli"` 覆盖。
 - 修改 Rust 后运行 `cargo fmt --all`。
 - 需要长期留痕的证据（命令包装、失败集合对比、汇总报告）：见 `scripts/codex/README.md`。
 - 文档检查：`python3 scripts/codex/generate_agent_index.py --check`、`python3 scripts/codex/docs_inventory.py --check`、`python3 scripts/codex/check_repository_facts.py`。
@@ -88,20 +88,22 @@
 
 ## 4. 从哪里读
 
-- 本地知识检索与检查删减定位：[`Agent知识库`](docs/Agent知识库.md)；查询入口 `python3 scripts/codex/query_project_knowledge.py --query <问题>`。排名只作导航，先回 current owner 和原文核对。
+- 按症状定位：先查生成的 [`Agent路由`](docs/生成索引/Agent路由.md)；它给出调用链、模块、机制和验证入口。
+- 已知问题领域：从 [`docs/INDEX.md`](docs/INDEX.md) 的七个领域入口进入，先读对应 `README.md`，再按 canonical/owner 收敛。
+- 已知代码、数据或命令：查 [`docs/PROJECT_MAP.md`](docs/PROJECT_MAP.md) 的相关段，不需要通读。
+- 不知道如何分类、需要全量查漏：查生成的 [`文档目录`](docs/生成索引/文档目录.md)；模糊关键词用 `python3 scripts/codex/query_project_knowledge.py --query <问题>`。排名只作导航，先回 current owner 和原文核对。
 - 本项目 Agent 知识库建设任务：压缩、交接或接续后，先完整读 [`项目Agent知识库建设计划`](docs/ARCHIVE/done/项目Agent知识库建设计划-20261101.md)，按其中进度和恢复顺序继续；阶段完成、重要裁决和交接前及时更新。来源：用户 2026-11-01 明确要求完整计划、及时更新及压缩后优先回看。
-- 按症状找文档：[`docs/INDEX.md`](docs/INDEX.md)。代码 owner 和命令：[`docs/PROJECT_MAP.md`](docs/PROJECT_MAP.md) 的相关段，不需要通读。
 - 文档角色、生命周期与归档：[`docs/文档生命周期.md`](docs/文档生命周期.md)。
-- 保证等级、风险分层验证、无人值守：[`docs/QUALITY_AND_AUDIT.md`](docs/QUALITY_AND_AUDIT.md)。
-- 游戏机制不在本仓复制：先读 [`docs/知识库引用.md`](docs/知识库引用.md)，再进入固定版本 `arknights-base-vault` 的对应章节。
+- 保证等级、风险分层验证、无人值守：[`docs/质量与维护/QUALITY_AND_AUDIT.md`](docs/质量与维护/QUALITY_AND_AUDIT.md)。
+- 游戏机制不在本仓复制：先读 [`docs/机制/知识库引用.md`](docs/机制/知识库引用.md)，再进入固定版本 `arknights-base-vault` 的对应章节。
 - 触及下列主题时，先完整读对应文档：
 
 | 主题 | 先读 |
 |---|---|
-| 控制中枢选位、效果账本 | `docs/CONTROL_CENTER_ASSIGNMENT.md`；进行中的重构：`docs/TODO/中枢效果账本与顺序选位重构.md` |
-| 能力影子候选、跨设施共享归属 | `docs/TODO/能力影子候选设计.md`（proposal；当前适用域仅夜烟）。它与挂件 receiver / SupportPool 是两个问题 |
+| 控制中枢选位、效果账本 | `docs/机制/CONTROL_CENTER_ASSIGNMENT.md`；进行中的重构：`docs/TODO/详情/核心求解/中枢效果账本与顺序选位重构.md` |
+| 能力影子候选、跨设施共享归属 | `docs/TODO/详情/核心求解/能力影子候选设计.md`（proposal；当前适用域仅夜烟）。它与挂件 receiver / SupportPool 是两个问题 |
 | 技能档位 `tier_0` / `tier_up` | `docs/模块/输入与技能映射.md` |
-| 练卡推荐 | `docs/练卡推荐相关/README.md`。旧 v2 机器诊断合同已归档，只用于兼容对照，不能覆盖该目录 |
+| 练卡推荐 | `docs/产品与训练/README.md`。旧 v2 机器诊断合同已归档，只用于兼容对照，不能覆盖该目录 |
 
 ## 5. Skills
 
@@ -125,7 +127,7 @@
 - memory 只记可丢弃的检索提示和协作偏好，注明来源、日期、适用范围和复核 / 失效条件；区分用户原话、转述和 agent 推断，阶段性授权不升为长期默认。新裁决覆盖旧条目时更新当前摘要，历史原话保留。领域语义、用户裁决、实现、架构和活动任务进版本化 owner 文档。
 - 不能遗漏且可程序化的约束，按具体任务落实到类型、断言、检查脚本、CI、权限或 writer 锁；文档说明理由、入口和实际保证。新增门禁用违规例子验证能阻断，未实现的自动执行明确注明；表达偏好不做强制门禁。
 - 验证方式来源：用户 2026-10-31 明确裁决“本项目不需要添加测试，以前的也要删掉。我们有其他方法去检查他的错误。”保留生产终态断言、批量 Box、真实 CLI 与文档检查。
-- 本轮补充及调整来源：用户 2026-10-29 在工作习惯提取、联网评估后明确批准，并裁决“子代理人数我不觉得需要固定，现在的agent足够聪明能进行这个分配”。
+- 本轮补充及调整来源：用户 2026-10-29 在工作习惯提取、联网评估后明确批准，并裁决“子代理人数我不觉得需要固定，现在的agent足够聪明能进行这个分配”。用户 2026-10-30 明确纠正：项目是单人线性维护，不需要为任务、调查、隔离或并行收益创建分支/worktree；agent 未经用户当次明确要求不得创建分支。
 
 <!-- 线性维护约束来源：用户 2026-10-30 明确纠正，不得为了调查、隔离或并行收益自行创建分支/worktree。 -->
 

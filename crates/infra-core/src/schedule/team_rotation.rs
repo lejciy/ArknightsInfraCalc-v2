@@ -50,34 +50,227 @@ use super::shift_bind::{shift_binds_from_plan, team_of_operator, validate_final_
 const FIAMMETTA_NAME: &str = "菲亚梅塔";
 const SPHINX_NAME: &str = "深巡";
 const ULPIANUS_NAME: &str = "乌尔比安";
-// ABC admission uses this state only for ETA; it does not choose beds or change
-// production assignments. A 12/12/12 off-shift is the approved full-rest approximation;
-// any other off-shift recovers at the lowest dormitory base rate (no skill bonus, no
-// bed assumption), capped at mood_cap.
+// Auxiliary admission consumes actual working drains and explicit dorm presence.
+// An unassigned operator receives no assumed recovery, including MAA autofill.
 fn advance_rotation_mood(
     model: &MoodModel,
     blueprint: &BaseBlueprint,
     instances: &OperatorInstances,
     assignment: &BaseAssignment,
     hours: f64,
-    full_rest: bool,
     mood: &mut HashMap<String, f64>,
 ) {
     let eta = shift_eta_with_instances(model, blueprint, assignment, instances);
-    let working: HashSet<_> = eta.per_op.iter().map(|op| op.name.as_str()).collect();
-    for (name, value) in mood.iter_mut() {
-        if !working.contains(name.as_str()) {
-            *value = if full_rest {
-                model.mood_cap
-            } else {
-                (*value + model.dorm_base_recovery(1) * hours).min(model.mood_cap)
-            };
-        }
-    }
     for op in eta.per_op {
         let value = mood.entry(op.name).or_insert(model.mood_cap);
-        *value = (*value - op.drain_per_hour * hours).max(0.0);
+        *value = (*value - op.drain_per_hour * hours).clamp(0.0, model.mood_cap);
     }
+    for room in blueprint.rooms_of(FacilityKind::Dormitory) {
+        let occupants: Vec<_> = assignment
+            .operators_in(&room.id)
+            .iter()
+            .map(|operator| DormOccupant {
+                name: operator.name.clone(),
+                elite: operator.elite,
+                drain_hint: model.mood_cap
+                    - mood.get(&operator.name).copied().unwrap_or(model.mood_cap),
+            })
+            .collect();
+        for (name, rate) in dorm_recovery_rates(model, room.dorm_skill_level(), &occupants) {
+            let value = mood.entry(name).or_insert(model.mood_cap);
+            *value = (*value + rate * hours).min(model.mood_cap);
+        }
+    }
+}
+
+fn initial_rotation_mood(
+    model: &MoodModel,
+    operbox: &OperBox,
+    initial_mood: f64,
+) -> HashMap<String, f64> {
+    operbox
+        .owned
+        .keys()
+        .map(|name| (name.clone(), initial_mood.clamp(0.0, model.mood_cap)))
+        .collect()
+}
+
+fn preview_auxiliary_mood_at(
+    blueprint: &BaseBlueprint,
+    operbox: &OperBox,
+    instances: &OperatorInstances,
+    shifts: &[TeamShiftResult],
+    index: usize,
+    initial_mood: f64,
+) -> Result<HashMap<String, f64>> {
+    let model = default_mood_model()?;
+    let mut mood = initial_rotation_mood(&model, operbox, initial_mood);
+    let mut preview = shifts.to_vec();
+    // Use the ordinary dorm owner to preview explicit beds without committing state.
+    dorm_finalizer::finalize_dorms(blueprint, operbox, &mut preview)?;
+    for shift in preview.iter().take(index) {
+        advance_rotation_mood(
+            &model,
+            blueprint,
+            instances,
+            &shift.assignment,
+            shift.duration_hours,
+            &mut mood,
+        );
+    }
+    Ok(mood)
+}
+
+struct AuxiliaryShiftBudget<'a> {
+    blueprint: &'a BaseBlueprint,
+    instances: &'a OperatorInstances,
+    model: &'a MoodModel,
+    mood: &'a HashMap<String, f64>,
+    hours: f64,
+    previous: &'a [TeamShiftResult],
+    last_shift: bool,
+    bound: &'a HashSet<String>,
+}
+
+impl AuxiliaryShiftBudget<'_> {
+    fn fits_room(&self, trial: &BaseAssignment, room: &RoomId) -> bool {
+        let eta = shift_eta_with_instances(self.model, self.blueprint, trial, self.instances);
+        trial.operators_in(room).iter().all(|operator| {
+            if self.bound.contains(&operator.name) {
+                return true;
+            }
+            let rested = !self.last_shift
+                || self.previous.is_empty()
+                || self.previous.iter().any(|shift| {
+                    !shift.assignment.iter_rooms().any(|assigned| {
+                        self.blueprint.room(&assigned.room_id).is_some_and(|spec| {
+                            spec.kind != FacilityKind::Dormitory
+                                && assigned.operators.iter().any(|op| op.name == operator.name)
+                        })
+                    })
+                });
+            rested
+                && eta
+                    .operator_in_room(&operator.name, &room.0)
+                    .is_some_and(|operator_eta| {
+                        crate::mood::fits_work_budget(
+                            self.model,
+                            self.mood
+                                .get(&operator.name)
+                                .copied()
+                                .unwrap_or(self.model.mood_cap),
+                            operator_eta.drain_per_hour,
+                            self.hours,
+                        )
+                    })
+        })
+    }
+}
+
+fn auxiliary_bound_names(report: &TeamRotationReport) -> HashSet<String> {
+    report
+        .assignment_plans
+        .iter()
+        .flat_map(|plan| {
+            plan.anchors
+                .iter()
+                .map(|anchor| anchor.operator.clone())
+                .chain(
+                    plan.active_dependencies
+                        .iter()
+                        .flat_map(|dependency| dependency.required.iter().cloned()),
+                )
+        })
+        .chain(
+            report
+                .runtime_shift_binds
+                .iter()
+                .flat_map(|bind| bind.operators.iter().cloned()),
+        )
+        .chain(
+            report
+                .shifts
+                .iter()
+                .filter_map(|shift| shift.fiammetta.as_ref().map(|action| action.target.clone())),
+        )
+        .collect()
+}
+
+fn assert_auxiliary_shift_budgets(
+    blueprint: &BaseBlueprint,
+    operbox: &OperBox,
+    instances: &OperatorInstances,
+    report: &TeamRotationReport,
+) -> Result<()> {
+    if !report.profile.is_ordinary_abc() && report.profile != TimedRotationProfile::Fiammetta8_8_4_4
+    {
+        return Ok(());
+    }
+    let model = default_mood_model()?;
+    let bound = auxiliary_bound_names(report);
+    let mut mood = initial_rotation_mood(&model, operbox, report.auxiliary_initial_mood);
+    let mut always_working = report
+        .shifts
+        .first()
+        .map(|shift| shift.assignment.work_position_operator_names(blueprint))
+        .unwrap_or_default();
+    for shift in report.shifts.iter().skip(1) {
+        let working = shift.assignment.work_position_operator_names(blueprint);
+        always_working.retain(|name| working.contains(name));
+    }
+    for (index, shift) in report.shifts.iter().enumerate() {
+        // Validate the committed timeline independently of candidate admission.
+        // In particular, never assign a missing dorm occupant during replay.
+        let eta = shift_eta_with_instances(&model, blueprint, &shift.assignment, instances);
+        for room in blueprint
+            .rooms
+            .iter()
+            .filter(|room| matches!(room.kind, FacilityKind::Office | FacilityKind::MeetingRoom))
+        {
+            for operator in shift.assignment.operators_in(&room.id) {
+                if bound.contains(&operator.name) {
+                    continue;
+                }
+                let operator_eta = eta
+                    .operator_in_room(&operator.name, &room.id.0)
+                    .ok_or_else(|| {
+                        Error::msg(format!(
+                            "assert-invariants auxiliary_shift_budget missing drain in shift {} room {} for {}",
+                            index + 1, room.id.0, operator.name,
+                        ))
+                    })?;
+                let available = mood.get(&operator.name).copied().unwrap_or(model.mood_cap);
+                if !crate::mood::fits_work_budget(
+                    &model,
+                    available,
+                    operator_eta.drain_per_hour,
+                    shift.duration_hours,
+                ) || (index + 1 == report.shifts.len()
+                    && always_working.contains(&operator.name))
+                {
+                    return Err(Error::msg(format!(
+                        "assert-invariants auxiliary_shift_budget failed in shift {} room {} for {}: mood {:.3}, drain {:.3}/h, hours {:.3}, worked_every_shift {}",
+                        index + 1,
+                        room.id.0,
+                        operator.name,
+                        available,
+                        operator_eta.drain_per_hour,
+                        shift.duration_hours,
+                        always_working.contains(&operator.name),
+                    )));
+                }
+            }
+        }
+        advance_rotation_mood(
+            &model,
+            blueprint,
+            instances,
+            &shift.assignment,
+            shift.duration_hours,
+            &mut mood,
+        );
+    }
+    Ok(())
 }
 
 /// 兼容入口：事件、物理菲亚预算与 ready 判定统一由 `fiammetta_events` 重放。
@@ -594,16 +787,31 @@ fn rotating_team_for_names(
     binds: &[RuntimeShiftBind],
     names: &HashSet<String>,
     production_team_by_name: &HashMap<String, TeamLabel>,
+    shift_hours: &[f64; 3],
 ) -> HashMap<String, TeamLabel> {
+    // A standalone Plan bind still needs one cohort. Prefer the longest active
+    // window; ties retain the first label. All callers derive the same fallback.
+    let standalone = [
+        (TeamLabel::Alpha, shift_hours[0] + shift_hours[2]),
+        (TeamLabel::Beta, shift_hours[0] + shift_hours[1]),
+        (TeamLabel::Gamma, shift_hours[1] + shift_hours[2]),
+    ]
+    .into_iter()
+    .fold((TeamLabel::Alpha, 0.0), |best, candidate| {
+        if candidate.1 > best.1 {
+            candidate
+        } else {
+            best
+        }
+    })
+    .0;
     let mut teams = HashMap::new();
     for bind in binds {
-        let Some(team) = bind
+        let team = bind
             .operators
             .iter()
             .find_map(|name| production_team_by_name.get(name).copied())
-        else {
-            continue;
-        };
+            .unwrap_or(standalone);
         for name in bind.operators.iter().filter(|name| names.contains(*name)) {
             teams.insert(name.clone(), team);
         }
@@ -727,6 +935,7 @@ fn assign_office_for_shift(
     active_bound_names: &HashSet<String>,
     bound_names: &HashSet<String>,
     candidates: &[AssignedOperator],
+    budget: Option<&AuxiliaryShiftBudget<'_>>,
 ) -> Result<()> {
     let available_candidates = office_remainder_pool(candidates, assignment);
     let mut used = assignment.occupied_operator_names();
@@ -782,7 +991,10 @@ fn assign_office_for_shift(
         assignment,
         blueprint,
         &available_candidates,
-        |_, _, _, candidate| !bound_names.contains(&candidate.name),
+        |_, trial, room, candidate| {
+            !bound_names.contains(&candidate.name)
+                && budget.is_none_or(|budget| budget.fits_room(trial, &room.id))
+        },
     );
     Ok(())
 }
@@ -814,7 +1026,7 @@ fn meeting_candidates(
 ) -> Vec<AssignedOperator> {
     let registry = crate::support_facility::SupportRegistry::load_default_shared()
         .expect("support registry loads in meeting candidate build");
-    let roster = operbox.roster();
+    let roster = operbox.roster_for_facility(FacilityKind::MeetingRoom);
     let winter_available = roster.names().any(|name| {
         !excluded.contains(name.as_str())
             && name == "忍冬"
@@ -910,333 +1122,123 @@ fn meeting_pair_score(
     .skill_speed_bonus_pct)
 }
 
-/// 每班从活跃队中选会客室成员填满会客室（每间两人）。
-///
-/// 活跃队成员按会客室候选评分序选择；cohort 不足时兜底 replacement，但
-/// replacement 必须排除休息队与所有已编队成员（`reserved`），避免休息队
-/// 成员因 meeting 兜底而返岗破坏"每班两队上岗、一队休息"的不变量。
+/// 普通会客岗位逐班按实际心情与完整同房技能择优；只有显式绑定成员跟随 Team。
 #[allow(clippy::too_many_arguments)]
-fn assign_rotating_meetings_with_context(
+fn assign_meetings_for_shift(
     assignment: &mut BaseAssignment,
     blueprint: &BaseBlueprint,
     active_teams: &[TeamLabel],
-    resting_team: TeamLabel,
     rotating_team: &HashMap<String, TeamLabel>,
     candidates: &[AssignedOperator],
     reserved: &HashSet<String>,
-    shift_hours: f64,
-    mood_state: Option<&HashMap<String, f64>>,
+    budget: &AuxiliaryShiftBudget<'_>,
     layout: &LayoutContext,
 ) -> Result<()> {
-    let extra_recruit_slots = blueprint
-        .rooms
+    let registry = crate::support_facility::SupportRegistry::load_default_shared()?;
+    let partners: HashSet<_> = registry
+        .entries
         .iter()
-        .filter(|room| room.kind == FacilityKind::Office)
+        .filter(|entry| entry.facility == crate::support_facility::SupportFacility::Meeting)
+        .flat_map(|entry| entry.effects.iter())
+        .filter_map(|effect| match effect {
+            crate::support_facility::SupportEffect::SpeedIfPartner { operator, .. } => {
+                Some(operator.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let extra_recruit_slots = blueprint
+        .rooms_of(FacilityKind::Office)
+        .into_iter()
         .map(|room| room.level.saturating_sub(1))
         .max()
         .unwrap_or(0);
-    let mut used = assignment.operator_names();
-    let mut active_rotating: Vec<&String> = rotating_team
-        .iter()
-        .filter(|(_, team)| active_teams.contains(team))
-        .map(|(name, _)| name)
-        .collect();
-    // 活跃队成员按会客室候选评分序（candidates 已按线索速度分降序）排列，
-    // 每班优先选择技能分更高的活跃成员。
-    active_rotating.sort_by_key(|name| {
-        candidates
-            .iter()
-            .position(|op| op.name == name.as_str())
-            .unwrap_or(usize::MAX)
-    });
-    let resting_reserved: HashSet<String> = reserved
-        .iter()
-        .filter(|name| rotating_team.get(name.as_str()) == Some(&resting_team))
-        .cloned()
-        .collect();
-    for room in blueprint
-        .rooms
-        .iter()
-        .filter(|room| room.kind == FacilityKind::MeetingRoom)
-    {
-        let mut operators = assignment.operators_in(&room.id).to_vec();
-        let pair_team = (rotating_team.get("忍冬"), rotating_team.get("铃兰"));
-        let pair_available = match pair_team {
-            (Some(left), Some(right)) => left == right && active_teams.contains(left),
-            (Some(team), None) => active_teams.contains(team) && !reserved.contains("铃兰"),
-            (None, Some(team)) => active_teams.contains(team) && !reserved.contains("忍冬"),
-            (None, None) => !reserved.contains("忍冬") && !reserved.contains("铃兰"),
-        };
-        if operators.is_empty() && pair_available {
-            let pair = candidates
-                .iter()
-                .find(|candidate| candidate.name == "忍冬" && candidate.elite >= 2)
-                .zip(candidates.iter().find(|candidate| candidate.name == "铃兰"));
-            if let Some((winter, suzuran)) = pair {
-                let mut trial = assignment.clone();
-                let pair_fits = [winter, suzuran].into_iter().all(|candidate| {
-                    if used.contains(&candidate.name) {
-                        return false;
-                    }
-                    let mut current = trial.operators_in(&room.id).to_vec();
-                    current.push((*candidate).clone());
-                    trial.set_room(room.id.clone(), current);
-                    true
-                });
-                if pair_fits {
-                    let mut ordinary = assignment.clone();
-                    for candidate in candidates.iter().filter(|candidate| {
-                        candidate.name != "铃兰"
-                            && rotating_team.get(&candidate.name).map_or_else(
-                                || !reserved.contains(&candidate.name),
-                                |team| active_teams.contains(team),
-                            )
-                            && !used.contains(&candidate.name)
-                    }) {
-                        let mut current = ordinary.operators_in(&room.id).to_vec();
-                        current.push(candidate.clone());
-                        ordinary.set_room(room.id.clone(), current);
-                        if ordinary.operators_in(&room.id).len() == room.operator_capacity() {
-                            break;
-                        }
-                    }
-                    if meeting_pair_score(
-                        trial.operators_in(&room.id),
-                        layout,
-                        shift_hours,
-                        mood_state,
-                        extra_recruit_slots,
-                    )? > meeting_pair_score(
-                        ordinary.operators_in(&room.id),
-                        layout,
-                        shift_hours,
-                        mood_state,
-                        extra_recruit_slots,
-                    )? {
-                        operators = vec![winter.clone(), suzuran.clone()];
-                        for member in &operators {
-                            used.insert(member.name.clone());
-                        }
-                    }
-                }
+    let mut used = assignment.occupied_operator_names();
+    for room in blueprint.rooms_of(FacilityKind::MeetingRoom) {
+        let mut fixed = assignment.operators_in(&room.id).to_vec();
+        for candidate in candidates.iter().filter(|candidate| {
+            rotating_team
+                .get(&candidate.name)
+                .is_some_and(|team| active_teams.contains(team))
+        }) {
+            if fixed.len() >= room.operator_capacity() {
+                break;
+            }
+            if used.insert(candidate.name.clone()) {
+                fixed.push(candidate.clone());
             }
         }
-        if operators.len() == 1 && (operators[0].name == "忍冬" || operators[0].name == "铃兰")
-        {
-            let partner_name = if operators[0].name == "忍冬" {
-                "铃兰"
-            } else {
-                "忍冬"
-            };
-            if let Some(partner) = candidates.iter().find(|candidate| {
-                candidate.name == partner_name
-                    && (partner_name != "忍冬" || candidate.elite >= 2)
-                    && !used.contains(&candidate.name)
+        let available: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| {
+                !used.contains(&candidate.name)
+                    // 技能先选、普通补位后选是具名 policy，非全账号两人组合穷举。
+                    && (partners.contains(candidate.name.as_str())
+                        || registry.entries.iter().any(|entry| {
+                            entry.facility == crate::support_facility::SupportFacility::Meeting
+                                && entry.operator == candidate.name
+                                && candidate.elite >= entry.min_elite
+                                && candidate.level >= entry.min_level
+                        }))
                     && rotating_team.get(&candidate.name).map_or_else(
                         || !reserved.contains(&candidate.name),
                         |team| active_teams.contains(team),
                     )
-            }) {
-                {
-                    let mut pair_members = operators.clone();
-                    pair_members.push(partner.clone());
-                    let mut ordinary = assignment.clone();
-                    for candidate in candidates.iter().filter(|candidate| {
-                        candidate.name != partner_name
-                            && !used.contains(&candidate.name)
-                            && rotating_team.get(&candidate.name).map_or_else(
-                                || !reserved.contains(&candidate.name),
-                                |team| active_teams.contains(team),
-                            )
-                    }) {
-                        ordinary.set_room(
-                            room.id.clone(),
-                            vec![operators[0].clone(), candidate.clone()],
-                        );
-                        break;
-                    }
-                    if meeting_pair_score(
-                        &pair_members,
-                        layout,
-                        shift_hours,
-                        mood_state,
-                        extra_recruit_slots,
-                    )? > meeting_pair_score(
-                        ordinary.operators_in(&room.id),
-                        layout,
-                        shift_hours,
-                        mood_state,
-                        extra_recruit_slots,
-                    )? {
-                        used.insert(partner.name.clone());
-                        operators.push(partner.clone());
+            })
+            .collect();
+        let mut best = fixed.clone();
+        let mut best_score = meeting_pair_score(
+            &fixed,
+            layout,
+            budget.hours,
+            Some(budget.mood),
+            extra_recruit_slots,
+        )?;
+        let mut consider = |members: Vec<AssignedOperator>| -> Result<()> {
+            if members.len() > room.operator_capacity()
+                || (members.iter().any(|op| op.name == "铃兰")
+                    && !members.iter().any(|op| op.name == "忍冬" && op.elite >= 2))
+            {
+                return Ok(());
+            }
+            let mut trial = assignment.clone();
+            trial.set_room(room.id.clone(), members.clone());
+            if !budget.fits_room(&trial, &room.id) {
+                return Ok(());
+            }
+            let score = meeting_pair_score(
+                &members,
+                layout,
+                budget.hours,
+                Some(budget.mood),
+                extra_recruit_slots,
+            )?;
+            if members.len() > best.len() || (members.len() == best.len() && score > best_score) {
+                best = members;
+                best_score = score;
+            }
+            Ok(())
+        };
+        if fixed.len() < room.operator_capacity() {
+            for (index, candidate) in available.iter().enumerate() {
+                let mut members = fixed.clone();
+                members.push((*candidate).clone());
+                consider(members.clone())?;
+                if members.len() < room.operator_capacity() {
+                    for partner in &available[index + 1..] {
+                        let mut pair = members.clone();
+                        pair.push((*partner).clone());
+                        consider(pair)?;
                     }
                 }
             }
         }
-        while operators.len() < room.operator_capacity() {
-            let rotating = active_rotating.iter().find_map(|name| {
-                candidates.iter().find(|op| {
-                    op.name == name.as_str()
-                        && !used.contains(&op.name)
-                        && (op.name != "铃兰"
-                            || operators
-                                .iter()
-                                .any(|member| member.name == "忍冬" && member.elite >= 2))
-                })
-            });
-            let replacement = candidates.iter().find(|op| {
-                (op.name != "铃兰"
-                    || operators
-                        .iter()
-                        .any(|member| member.name == "忍冬" && member.elite >= 2))
-                    && !used.contains(&op.name)
-                    && !rotating_team.contains_key(&op.name)
-                    && !resting_reserved.contains(&op.name)
-                    && !reserved.contains(&op.name)
-            });
-            let Some(op) = rotating.or(replacement).cloned() else {
-                break;
-            };
-            used.insert(op.name.clone());
-            operators.push(op.clone());
+        for member in &best {
+            used.insert(member.name.clone());
         }
-        if !operators.is_empty() {
-            assignment.set_room(room.id.clone(), operators);
+        if !best.is_empty() {
+            assignment.set_room(room.id.clone(), best);
         }
-    }
-    Ok(())
-}
-
-fn complete_rotating_meeting_teams(
-    blueprint: &BaseBlueprint,
-    peak_meeting_names: &HashSet<String>,
-    rotating_team: &mut HashMap<String, TeamLabel>,
-    meeting_pool: &[AssignedOperator],
-    reserved: &mut HashSet<String>,
-) -> Result<()> {
-    let capacity = blueprint
-        .rooms
-        .iter()
-        .filter(|room| room.kind == FacilityKind::MeetingRoom)
-        .map(|room| room.operator_capacity())
-        .sum::<usize>();
-    if capacity == 0 {
-        return Ok(());
-    }
-
-    let mut unbound_peak: Vec<_> = peak_meeting_names
-        .iter()
-        .filter(|name| !rotating_team.contains_key(*name))
-        .cloned()
-        .collect();
-    unbound_peak.sort();
-    if peak_meeting_names.contains("忍冬") && peak_meeting_names.contains("铃兰") {
-        if let Some(team) = rotating_team
-            .get("忍冬")
-            .copied()
-            .or_else(|| rotating_team.get("铃兰").copied())
-        {
-            rotating_team.insert("忍冬".to_string(), team);
-            rotating_team.insert("铃兰".to_string(), team);
-            unbound_peak.retain(|name| name != "忍冬" && name != "铃兰");
-        }
-    }
-    // 峰值只选中忍冬时，仍把可用铃兰作为同队的待比较搭档带入轮换；
-    // 是否最终进房由当班完整双人收益决定。
-    if peak_meeting_names.contains("忍冬")
-        && !peak_meeting_names.contains("铃兰")
-        && !rotating_team.contains_key("铃兰")
-        && !reserved.contains("铃兰")
-        && meeting_pool.iter().any(|operator| operator.name == "铃兰")
-    {
-        let winter_team = rotating_team.get("忍冬").copied();
-        if let Some(team) = winter_team.or_else(|| {
-            TeamLabel::ALL.into_iter().min_by_key(|team| {
-                rotating_team
-                    .values()
-                    .filter(|assigned| *assigned == team)
-                    .count()
-            })
-        }) {
-            rotating_team.insert("忍冬".to_string(), team);
-            rotating_team.insert("铃兰".to_string(), team);
-            unbound_peak.retain(|name| name != "忍冬");
-        }
-    }
-    // 峰值已选中的同室搭档先归入一队，避免均衡分队把两人拆开。
-    if unbound_peak.iter().any(|name| name == "忍冬")
-        && unbound_peak.iter().any(|name| name == "铃兰")
-    {
-        if let Some(team) = TeamLabel::ALL.into_iter().min_by_key(|team| {
-            rotating_team
-                .values()
-                .filter(|assigned| *assigned == team)
-                .count()
-        }) {
-            rotating_team.insert("忍冬".to_string(), team);
-            rotating_team.insert("铃兰".to_string(), team);
-            unbound_peak.retain(|name| name != "忍冬" && name != "铃兰");
-        }
-    }
-    // 先按"每队人数最少者"轮转分摊 peak 成员，使有限候选均匀铺开；
-    // 避免把候选集中到某队导致其他队缺员、每班出现可避免的空位。
-    for name in unbound_peak {
-        let team = TeamLabel::ALL
-            .into_iter()
-            .min_by_key(|team| {
-                rotating_team
-                    .values()
-                    .filter(|assigned| *assigned == team)
-                    .count()
-            })
-            .expect("TeamLabel::ALL is non-empty");
-        rotating_team.insert(name, team);
-    }
-
-    // 候选池成员同样按最少队优先轮转，逐队补到 capacity 下限；
-    // 若候选不足，保证人数少的队优先获得，而不是按固定队序填充。
-    let mut remaining_pool: Vec<&AssignedOperator> = meeting_pool
-        .iter()
-        .filter(|operator| {
-            !reserved.contains(&operator.name)
-                && !rotating_team.contains_key(&operator.name)
-                && operator.name != "铃兰"
-        })
-        .collect();
-    // meeting_pool 已按线索速度评分降序（无技能者 0 分按名序）；保持该序，
-    // 每次取评分最高的未用者，分配给当前人数最少的队（不是固定队序），
-    // 保证技能者优先且队伍均衡，避免出现可避免的空位。
-    loop {
-        let least_team = TeamLabel::ALL
-            .iter()
-            .min_by_key(|team| {
-                rotating_team
-                    .values()
-                    .filter(|assigned| assigned == team)
-                    .count()
-            })
-            .copied();
-        let Some(team) = least_team else {
-            break;
-        };
-        let count = rotating_team
-            .values()
-            .filter(|assigned| assigned == &&team)
-            .count();
-        if count >= capacity {
-            break;
-        }
-        let Some(index) = remaining_pool.iter().position(|operator| {
-            !reserved.contains(&operator.name) && !rotating_team.contains_key(&operator.name)
-        }) else {
-            break;
-        };
-        // remove(index) 保持评分降序（swap_remove 会把末尾兜底者换到前面，
-        // 破坏"技能者优先"顺序）。
-        let operator = remaining_pool.remove(index);
-        rotating_team.insert(operator.name.clone(), team);
-        reserved.insert(operator.name.clone());
     }
     Ok(())
 }
@@ -1251,7 +1253,7 @@ fn recycle_candidates(
     table: &SkillTable,
     excluded: &HashSet<String>,
 ) -> Result<(Vec<AssignedOperator>, Vec<AssignedOperator>)> {
-    let roster = operbox.roster();
+    let roster = operbox.roster_for_facility(FacilityKind::Recycle);
     let mut skilled = Vec::new();
     let mut fallback = Vec::new();
     for name in roster
@@ -1276,7 +1278,7 @@ fn recycle_candidates(
     Ok((skilled.into_iter().map(|(_, op)| op).collect(), fallback))
 }
 
-/// 回收站队伍归属：在逐班填充之前冻结，口径同 `complete_rotating_meeting_teams`。
+/// 回收站队伍归属在逐班填充之前冻结；普通会客岗位不使用此生产队规则。
 ///
 /// 候选按评分序逐个分给当前人数最少的队，直到每队补到回收站工位数。
 /// 不引入第二套规则：每个人属于且仅属于一个队，每班只让活跃队的成员上岗，
@@ -1457,20 +1459,56 @@ fn rotation_vacancy_commit(
     let continuation_indices: Vec<_> = (index + 1..report.shifts.len())
         .take_while(|next| report.shifts[*next].transition == ShiftTransition::FiammettaOnly)
         .collect();
-    let eligible: Vec<_> = candidates
-        .iter()
-        .filter(|operator| team_for(&operator.name).is_some())
-        .cloned()
-        .collect();
+    let independent_auxiliary = report.profile.is_ordinary_abc()
+        || report.profile == TimedRotationProfile::Fiammetta8_8_4_4;
+    let model = default_mood_model()?;
+    let mood = if independent_auxiliary {
+        Some(preview_auxiliary_mood_at(
+            blueprint,
+            operbox,
+            instances,
+            &report.shifts,
+            index,
+            report.auxiliary_initial_mood,
+        )?)
+    } else {
+        None
+    };
+    let bound = auxiliary_bound_names(report);
+    let budget = mood.as_ref().map(|mood| AuxiliaryShiftBudget {
+        blueprint,
+        instances,
+        model: &model,
+        mood,
+        hours: report.shifts[index].duration_hours,
+        previous: &report.shifts[..index],
+        last_shift: index + 1 == report.shifts.len(),
+        bound: &bound,
+    });
     let mut assignment = report.shifts[index].assignment.clone();
     let placements = fill_workplace_vacancies(
         blueprint,
         &mut assignment,
-        &eligible,
+        &candidates,
         instances,
         table,
         |trial, room, candidate| {
             if !crate::layout::plan_admits_workplace_candidate(plan, trial, room, candidate) {
+                return false;
+            }
+            if let Some(budget) = budget
+                .as_ref()
+                .filter(|_| matches!(room.kind, FacilityKind::Office | FacilityKind::MeetingRoom))
+            {
+                if !budget.fits_room(trial, &room.id)
+                    || report.teams.iter().any(|team| {
+                        team.operators.contains(&candidate.name)
+                            && !report.shifts[index].active_teams.contains(&team.label)
+                    })
+                {
+                    return false;
+                }
+            } else if team_for(&candidate.name).is_none() {
                 return false;
             }
             let mut trial_report = report.clone();
@@ -1515,8 +1553,16 @@ fn rotation_vacancy_commit(
     )?;
     let memberships: Vec<_> = placements
         .iter()
-        .filter_map(|(_, operator)| {
-            team_for(&operator.name).map(|team| (operator.name.clone(), team))
+        .filter_map(|(room, operator)| {
+            if independent_auxiliary
+                && blueprint.room(room).is_some_and(|room| {
+                    matches!(room.kind, FacilityKind::Office | FacilityKind::MeetingRoom)
+                })
+            {
+                None
+            } else {
+                team_for(&operator.name).map(|team| (operator.name.clone(), team))
+            }
         })
         .collect();
     if placements.is_empty() {
@@ -2667,6 +2713,7 @@ fn complete_timed_rotation(
     fiammetta_enable: bool,
     mut report: RotationDraft,
 ) -> Result<TeamRotationReport> {
+    report.auxiliary_initial_mood = initial_mood;
     let preserve_actions = report.shifts.iter().any(|shift| shift.fiammetta.is_some())
         && (report.profile.is_ordinary_abc()
             || report.profile == TimedRotationProfile::MainBackup24_24
@@ -3705,7 +3752,11 @@ fn owned_abyssal_hunters(
     let mut hunters: Vec<_> = operbox
         .entries
         .iter()
-        .filter(|entry| entry.own && !used_ab.contains(&entry.name))
+        .filter(|entry| {
+            entry.own
+                && !used_ab.contains(&entry.name)
+                && operbox.admits_facility(&entry.name, FacilityKind::Factory)
+        })
         .filter(|entry| {
             let tier =
                 PromotionTier::from_elite_rarity_level(entry.elite, entry.rarity, entry.level);
@@ -3731,6 +3782,9 @@ fn abyssal_manu_entry(
     instances: &OperatorInstances,
     table: &SkillTable,
 ) -> Option<ManuPoolEntry> {
+    if !operbox.admits_facility(name, FacilityKind::Factory) {
+        return None;
+    }
     let progress = operbox.progress_of(name)?;
     let tier = PromotionTier::from_progress(progress);
     let buff_ids = instances.resolve_manufacture_buff_ids(name, tier);
@@ -3903,13 +3957,33 @@ fn enumerate_abyssal_counts(
 
 /// 从编排计划中提取体系绑定的实际中枢干员名。
 fn system_control_operators(plan: &AssignmentPlan, peak_ctrl: &HashSet<String>) -> HashSet<String> {
-    plan.anchors
-        .iter()
-        .filter(|anchor| {
-            anchor.facility == FacilityKind::ControlCenter && peak_ctrl.contains(&anchor.operator)
-        })
-        .map(|anchor| anchor.operator.clone())
+    fixed_plan_control_members(plan)
+        .filter(|(_, name)| peak_ctrl.contains(*name))
+        .map(|(_, name)| name.to_string())
         .collect()
+}
+
+fn fixed_plan_control_members(plan: &AssignmentPlan) -> impl Iterator<Item = (&str, &str)> {
+    let anchors = plan
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.facility == FacilityKind::ControlCenter)
+        .map(|anchor| (anchor.system_id.as_str(), anchor.operator.as_str()));
+    let registry = plan.registry_claims.iter().flat_map(|claim| {
+        claim
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.facility == FacilityKind::ControlCenter
+                    && slot.fill != crate::layout::SlotFillMode::Search
+            })
+            .flat_map(move |slot| {
+                slot.operators
+                    .iter()
+                    .map(move |operator| (claim.system_id.as_str(), operator.name.as_str()))
+            })
+    });
+    anchors.chain(registry)
 }
 
 /// 判断体系的控制中枢干员应归属哪个队伍（基于生产 slot 所在半区）。
@@ -3953,22 +4027,19 @@ fn build_team_control_map(
     let mut team_map: HashMap<TeamLabel, Vec<String>> = HashMap::new();
 
     // Step 1: 体系实际落位的中枢干员归属到对应队伍。
-    for anchor in plan
-        .anchors
-        .iter()
-        .filter(|anchor| anchor.facility == FacilityKind::ControlCenter)
-    {
+    for (system_id, name) in fixed_plan_control_members(plan) {
         let team = plan
             .activated
             .iter()
-            .find(|system| system.system_id == anchor.system_id)
+            .find(|system| system.system_id == system_id)
             .and_then(|system| system_control_team(system, h1))
             .unwrap_or(TeamLabel::Alpha);
-        if peak_set.contains(&anchor.operator) {
-            team_map
-                .entry(team)
-                .or_default()
-                .push(anchor.operator.clone());
+        if peak_set.contains(name)
+            && !team_map
+                .values()
+                .any(|members| members.iter().any(|member| member == name))
+        {
+            team_map.entry(team).or_default().push(name.to_string());
         }
     }
 
@@ -4066,6 +4137,7 @@ fn pick_control_plugin_team(
 fn balance_control_plugin_class(
     team_ctrl: &mut HashMap<TeamLabel, Vec<String>>,
     entry_by_name: &HashMap<String, crate::pool::ControlPoolEntry>,
+    protected: &HashSet<String>,
     class: fn(&crate::pool::ControlPoolEntry) -> bool,
 ) {
     loop {
@@ -4079,6 +4151,11 @@ fn balance_control_plugin_class(
         let Some(from_team) = TeamLabel::ALL
             .into_iter()
             .filter(|team| team_control_class_count(team_ctrl, entry_by_name, *team, class) > 1)
+            .filter(|team| {
+                team_ctrl.get(team).into_iter().flatten().any(|name| {
+                    !protected.contains(name) && entry_by_name.get(name).is_some_and(class)
+                })
+            })
             .max_by_key(|team| {
                 (
                     team_control_class_count(team_ctrl, entry_by_name, *team, class),
@@ -4096,7 +4173,9 @@ fn balance_control_plugin_class(
             names
                 .iter()
                 .enumerate()
-                .filter(|(_, name)| entry_by_name.get(*name).is_some_and(class))
+                .filter(|(_, name)| {
+                    !protected.contains(*name) && entry_by_name.get(*name).is_some_and(class)
+                })
                 .max_by(|(_, a), (_, b)| {
                     let aw = entry_by_name
                         .get(*a)
@@ -4306,6 +4385,45 @@ fn collect_recycle_rotation_issues(
                 }
             });
             check!("recycle_efficiency", {
+                for operator in operators {
+                    let progress = crate::roster::OperatorProgress::new(
+                        operator.elite,
+                        operator.level,
+                        operator.rarity,
+                    );
+                    let has_verified_upgrade = [
+                        crate::tier::PromotionTier::Tier0,
+                        crate::tier::PromotionTier::TierUp,
+                    ]
+                    .into_iter()
+                    .filter_map(|tier| instances.get(&operator.name, tier))
+                    .filter_map(|instance| instance.facilities.get("recycle"))
+                    .flat_map(|binding| binding.buff_ids.iter())
+                    .any(|buff| {
+                        matches!(
+                            buff.as_str(),
+                            "recycle_spd&cost[001]" | "recycle_spd&cost[011]"
+                        )
+                    });
+                    if has_verified_upgrade {
+                        // 上游固定 buff 的真实 E2 门槛，独立于实例 min_elite 配置。
+                        let expected_buff = if operator.elite >= 2 {
+                            "recycle_spd&cost[011]"
+                        } else {
+                            "recycle_spd&cost[001]"
+                        };
+                        let actual = instances.resolve_recycle_buff_ids(&operator.name, progress);
+                        let expected_efficiency = if operator.elite >= 2 { 0.30 } else { 0.20 };
+                        if actual != [expected_buff]
+                            || crate::recycle::recycle_skill_efficiency(instances, table, operator)?
+                                != Efficiency::from_decimal(expected_efficiency)
+                        {
+                            return Err(Error::msg(
+                                "recycle_skill_unlock: verified E2 upgrade mismatch",
+                            ));
+                        }
+                    }
+                }
                 let expected =
                     crate::recycle::evaluate_recycle(room.level, operators, instances, table)?;
                 let lines: Vec<_> = shift
@@ -4642,6 +4760,9 @@ pub fn collect_final_rotation_issues(
     issues.extend(collect_recycle_rotation_issues(
         blueprint, operbox, instances, table, report,
     ));
+    check!("auxiliary_shift_budget", {
+        assert_auxiliary_shift_budgets(blueprint, operbox, instances, report)?;
+    });
     check!("ordinary_admission", {
         for shift in &report.shifts {
             let plan = report
@@ -4650,6 +4771,28 @@ pub fn collect_final_rotation_issues(
                 .ok_or_else(|| {
                     Error::msg("assert-invariants ordinary_fallback_admission failed: missing Plan")
                 })?;
+            let admitted = operbox.with_roster_eta(
+                blueprint,
+                instances,
+                shift.assignment.work_hours.unwrap_or(shift.duration_hours),
+            )?;
+            for anchor in &plan.anchors {
+                if shift
+                    .assignment
+                    .room_of_operator(&anchor.operator)
+                    .is_some_and(|room| {
+                        blueprint.room(&room.room_id).is_some_and(|spec| {
+                            !admitted.admits_facility(&anchor.operator, spec.kind)
+                        })
+                    })
+                {
+                    return Err(Error::msg(format!(
+                        "assert-invariants initial_eta_plan_admission failed in shift {} for {}",
+                        shift.index + 1,
+                        anchor.operator
+                    )));
+                }
+            }
             let mut names = HashSet::new();
             for room in shift.assignment.iter_rooms() {
                 for operator in &room.operators {
@@ -6855,6 +6998,7 @@ fn schedule_abc_rotation_candidates_with_timing(
             &[],
             &[],
             true,
+            input_order_offset,
         )
         .and_then(|report| finish_candidate(report, false))?;
         write_candidate_report(options.fiammetta_candidates_out.as_deref(), "N", &report);
@@ -6876,6 +7020,7 @@ fn schedule_abc_rotation_candidates_with_timing(
         &[],
         &[],
         true,
+        input_order_offset,
     )
     .and_then(|report| finish_candidate(report, false));
     let (mut winner, baseline_error) = match baseline_result {
@@ -6930,6 +7075,7 @@ fn schedule_abc_rotation_candidates_with_timing(
             &relaxed,
             &[],
             true,
+            input_order_offset,
         )
         .and_then(|mut candidate| {
             attach_fiammetta_target_actions(
@@ -7008,6 +7154,7 @@ fn schedule_abc_rotation_candidates_with_timing(
             &relaxed,
             &["trade_core"],
             true,
+            input_order_offset,
         )
         .and_then(|mut candidate| {
             attach_fiammetta_target_actions(
@@ -7523,6 +7670,7 @@ fn schedule_abc_rotation(
     gamma_relaxed: &[&str],
     skip_systems: &[&str],
     enable_originium_pair: bool,
+    input_order_offset: Option<usize>,
 ) -> Result<RotationDraft> {
     match schedule_abc_rotation_once(
         blueprint,
@@ -7537,6 +7685,7 @@ fn schedule_abc_rotation(
         gamma_relaxed,
         skip_systems,
         enable_originium_pair,
+        input_order_offset,
     ) {
         Err(error @ Error::ControlRotationRequiredAnchorsExceedCapacity { .. })
             if !skip_systems.contains(&"pozyomka_durin") =>
@@ -7561,6 +7710,7 @@ fn schedule_abc_rotation(
                 gamma_relaxed,
                 &fallback_skip,
                 enable_originium_pair,
+                input_order_offset,
             )
         }
         result => result,
@@ -7581,12 +7731,19 @@ fn schedule_abc_rotation_once(
     gamma_relaxed: &[&str],
     skip_systems: &[&str],
     enable_originium_pair: bool,
+    input_order_offset: Option<usize>,
 ) -> Result<RotationDraft> {
     let t0 = Instant::now();
     let mut stage_perf = crate::profile::start_solver_stage("rotation_abc", "total");
     let mut peak_perf = crate::profile::start_solver_stage("rotation_abc", "peak");
     let cycle_hours: f64 = shift_hours.iter().sum();
     blueprint.validate()?;
+    let admitted = operbox.with_roster_eta(
+        blueprint,
+        instances,
+        shift_hours[0] + shift_hours[1].max(shift_hours[2]),
+    )?;
+    let operbox = &admitted;
 
     let durin_plan = operbox.durin_dorm_planning_count(instances);
     let mut originium_pair = if enable_originium_pair {
@@ -8003,8 +8160,18 @@ fn schedule_abc_rotation_once(
             .unwrap_or_else(|| pick_control_plugin_team(entry, &team_ctrl, &entry_by_name));
         team_ctrl.entry(team).or_default().push(entry.name.clone());
     }
-    balance_control_plugin_class(&mut team_ctrl, &entry_by_name, control_entry_trade_inject);
-    balance_control_plugin_class(&mut team_ctrl, &entry_by_name, control_entry_manu_inject);
+    balance_control_plugin_class(
+        &mut team_ctrl,
+        &entry_by_name,
+        &system_ctrl_names,
+        control_entry_trade_inject,
+    );
+    balance_control_plugin_class(
+        &mut team_ctrl,
+        &entry_by_name,
+        &system_ctrl_names,
+        control_entry_manu_inject,
+    );
     normalize_control_team_membership(&mut team_ctrl, &production_team_by_name);
     // 跨设施 shift bind 是最终归属约束，不能被中枢均衡策略再次拆开。
     for bind in &shift_binds {
@@ -8038,19 +8205,29 @@ fn schedule_abc_rotation_once(
             rotation_team_by_name.entry(name.clone()).or_insert(team);
         }
     }
-    let bound_office_team =
-        rotating_team_for_names(&shift_binds, &bound_office_names, &rotation_team_by_name);
-    let rotating_anchor_team =
-        rotating_team_for_names(&shift_binds, &rotating_anchor_names, &rotation_team_by_name);
-    let mut rotating_meeting_team = rotating_team_for_names(
+    let bound_office_team = rotating_team_for_names(
+        &shift_binds,
+        &bound_office_names,
+        &rotation_team_by_name,
+        &shift_hours,
+    );
+    let rotating_anchor_team = rotating_team_for_names(
+        &shift_binds,
+        &rotating_anchor_names,
+        &rotation_team_by_name,
+        &shift_hours,
+    );
+    let rotating_meeting_team = rotating_team_for_names(
         &shift_binds,
         &rotating_meeting_names,
         &rotation_team_by_name,
+        &shift_hours,
     );
     let office_plan_excluded: HashSet<String> =
         peak_plan.excluded_operators.iter().cloned().collect();
+    let auxiliary_operbox = operbox.with_auxiliary_shift_admission();
     let mut office_ranked_pool = office_candidates(
-        operbox,
+        &auxiliary_operbox,
         instances,
         table,
         &layout,
@@ -8069,17 +8246,11 @@ fn schedule_abc_rotation_once(
         .chain(rotating_anchor_names.iter().cloned())
         .collect();
     let meeting_pool = meeting_candidates(
-        operbox,
+        &auxiliary_operbox,
         &layout,
         &peak_plan.excluded_operators.iter().cloned().collect(),
     );
-    complete_rotating_meeting_teams(
-        blueprint,
-        &rotating_meeting_names,
-        &mut rotating_meeting_team,
-        &meeting_pool,
-        &mut reserved,
-    )?;
+    reserved.extend(rotating_meeting_team.keys().cloned());
     // 回收站队伍归属与会客室同一时点冻结：在中枢目录建立之前，
     // 且排除已预留给生产、中枢、办公室、会客室的成员。
     let mut recycle_excluded: HashSet<String> =
@@ -8278,16 +8449,41 @@ fn schedule_abc_rotation_once(
     let mut control_options = options.clone();
     control_options.skip_standalone_control = true;
     let mut warmup_sticky_rooms: HashMap<String, RoomId> = HashMap::new();
-    let mut rotation_mood: HashMap<String, f64> = operbox
-        .roster()
-        .names()
-        .map(|name| (name.to_string(), options.mood.min(mood_model.mood_cap)))
+    let mut rotation_mood =
+        preview_auxiliary_mood_at(blueprint, operbox, instances, &[], 0, options.mood)?;
+    let auxiliary_bound: HashSet<_> = peak_plan
+        .anchors
+        .iter()
+        .map(|anchor| anchor.operator.clone())
+        .chain(
+            peak_plan
+                .active_dependencies
+                .iter()
+                .flat_map(|dependency| dependency.required.iter().cloned()),
+        )
+        .chain(
+            shift_binds
+                .iter()
+                .flat_map(|bind| bind.operators.iter().cloned()),
+        )
         .collect();
-    let full_rest = profile == TimedRotationProfile::Abc12_12_12;
-    for (index, (hours, active, resting, parts)) in shift_specs.into_iter().enumerate() {
+    let mut chronological_specs: Vec<_> = shift_specs.into_iter().enumerate().collect();
+    chronological_specs.sort_by_key(|(index, _)| (input_order_offset.unwrap_or(0) + index) % 3);
+    for (position, (index, (hours, active, resting, parts))) in
+        chronological_specs.into_iter().enumerate()
+    {
         let shift_started = Instant::now();
         let shift_before = crate::profile::solver_perf_snapshot();
-        let scoring_mood = Some(&rotation_mood);
+        let auxiliary_budget = AuxiliaryShiftBudget {
+            blueprint,
+            instances,
+            model: &mood_model,
+            mood: &rotation_mood,
+            hours,
+            previous: &shifts,
+            last_shift: position == 2,
+            bound: &auxiliary_bound,
+        };
         // Control candidates were admitted and frozen before entering the shift loop.
         control_options.mood = options.mood;
         let assign_ctrl =
@@ -8314,6 +8510,15 @@ fn schedule_abc_rotation_once(
                     Err(error) => return Err(error),
                 };
                 *used = a.operator_names();
+                assign_office_for_shift(
+                    a,
+                    blueprint,
+                    &active_bound_office_names(&bound_office_team, &active),
+                    &bound_office_names,
+                    &office_ranked_pool,
+                    Some(&auxiliary_budget),
+                )?;
+                *used = a.operator_names();
                 let current_layout = crate::layout::resolve_control_input_layout(
                     blueprint,
                     a,
@@ -8331,7 +8536,8 @@ fn schedule_abc_rotation_once(
                         &control_options,
                         &control_admission.requirements(),
                         &HashSet::new(),
-                        None,
+                        (current_layout.office_room_count > 0)
+                            .then_some(current_layout.office_hire_spd_pct),
                         control_admission.required_names().contains("琴柳"),
                         None,
                         used,
@@ -8341,32 +8547,15 @@ fn schedule_abc_rotation_once(
                     a.construction_warnings.push(error.to_string());
                 }
                 {
-                    assign_office_for_shift(
-                        a,
-                        blueprint,
-                        &active_bound_office_names(&bound_office_team, &active),
-                        &bound_office_names,
-                        &office_ranked_pool
-                            .iter()
-                            .filter(|candidate| {
-                                control_closure
-                                    .team_of(&candidate.name)
-                                    .is_none_or(|team| active.contains(&team))
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    )?;
-                    assign_rotating_meetings_with_context(
+                    assign_meetings_for_shift(
                         a,
                         blueprint,
                         &active,
-                        resting,
                         &rotating_meeting_team,
                         &meeting_pool,
                         &reserved,
-                        hours,
-                        scoring_mood,
-                        &layout,
+                        &auxiliary_budget,
+                        &current_layout,
                     )?;
                     assign_rotating_recycle(
                         a,
@@ -8569,16 +8758,14 @@ fn schedule_abc_rotation_once(
                 weighted_power,
             });
         }
-        let assignment = &shifts.last().expect("shift just appended").assignment;
-        advance_rotation_mood(
-            &mood_model,
+        rotation_mood = preview_auxiliary_mood_at(
             blueprint,
+            operbox,
             instances,
-            assignment,
-            hours,
-            full_rest,
-            &mut rotation_mood,
-        );
+            &shifts,
+            shifts.len(),
+            options.mood,
+        )?;
         let shift_after = crate::profile::solver_perf_snapshot();
         crate::profile::emit_solver_stage(
             "rotation_abc",
@@ -8594,10 +8781,15 @@ fn schedule_abc_rotation_once(
         );
     }
 
+    // Candidate actions still address alpha phases. The adapter restores full
+    // shifts to input order after attaching them; mood selection above already
+    // followed that same input chronology.
+    shifts.sort_by_key(|shift| shift.index);
     let mut report = RotationDraft {
         prepared: false,
         report: TeamRotationReport {
             profile,
+            auxiliary_initial_mood: options.mood,
             assignment_plans: vec![peak_plan.clone()],
             peak_plan: peak_plan.clone(),
             runtime_shift_binds: shift_binds.clone(),
@@ -8618,22 +8810,30 @@ fn schedule_abc_rotation_once(
         report.warnings.push(warning);
     }
 
-    // Publish actual work cohorts rather than the unused candidate directory.
-    let actual_work: HashSet<_> = report
+    // Auxiliary work does not activate an unused control-directory cohort.
+    // Explicit auxiliary binds retain their declared team independently.
+    let actual_cohort_work: HashSet<_> = report
         .shifts
         .iter()
         .flat_map(|shift| shift.assignment.iter_rooms())
         .filter(|room| {
-            blueprint
-                .room(&room.room_id)
-                .is_some_and(|spec| spec.kind != FacilityKind::Dormitory)
+            blueprint.room(&room.room_id).is_some_and(|spec| {
+                !matches!(
+                    spec.kind,
+                    FacilityKind::Dormitory | FacilityKind::Office | FacilityKind::MeetingRoom
+                )
+            })
         })
         .flat_map(|room| &room.operators)
         .map(|op| op.name.clone())
         .collect();
     for team in &mut report.report.teams {
-        team.operators
-            .retain(|name| actual_work.contains(name) || rotating_anchor_team.contains_key(name));
+        team.operators.retain(|name| {
+            actual_cohort_work.contains(name)
+                || rotating_anchor_team.contains_key(name)
+                || bound_office_team.contains_key(name)
+                || rotating_meeting_team.contains_key(name)
+        });
     }
 
     if enable_fiammetta_return {
@@ -8724,6 +8924,13 @@ fn originium_pair_operator(
     name: &str,
     room_id: &RoomId,
 ) -> Result<AssignedOperator> {
+    if !operbox.admits_facility(name, FacilityKind::Factory) {
+        return Err(Error::OptionalRotationPlacementInfeasible {
+            message: format!(
+                "{ORIGINIUM_PAIR_SYSTEM_ID}: {name} did not pass the initial factory roster"
+            ),
+        });
+    }
     let progress = operbox.progress_of(name).ok_or_else(|| {
         Error::msg(format!(
             "{ORIGINIUM_PAIR_SYSTEM_ID}: {name} is not owned for room {}",
@@ -8754,6 +8961,8 @@ fn assign_originium_pair_peak(
     on_shifts: u8,
     off_shifts: u8,
 ) -> Result<crate::layout::AssignShiftResult> {
+    let admitted = operbox.with_roster_eta(blueprint, instances, options.shift_hours)?;
+    let operbox = &admitted;
     let mut stage_perf = crate::profile::start_solver_stage("rotation_abc", "originium_pair");
     let result = (|| {
         let mut planning_seed = BaseAssignment::default();
@@ -9019,13 +9228,41 @@ pub(crate) fn solve_policy_disjoint_backup(
     main: &BaseAssignment,
     shift_hours: f64,
 ) -> Result<OwnedRotationAssignment> {
+    solve_policy_backup_with_continuous_targets(
+        blueprint,
+        operbox,
+        instances,
+        table,
+        options,
+        main,
+        shift_hours,
+        &[],
+    )
+}
+
+/// Only the explicitly supported targets can cross the main/backup exclusion.
+/// Their room claims enter Plan before execution and ordinary teammate search.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_policy_backup_with_continuous_targets(
+    blueprint: &BaseBlueprint,
+    operbox: &OperBox,
+    instances: &OperatorInstances,
+    table: &SkillTable,
+    options: &AssignBaseOptions,
+    main: &BaseAssignment,
+    shift_hours: f64,
+    targets: &[(String, RoomId)],
+) -> Result<OwnedRotationAssignment> {
     // Two-team policy: the backup state is generated from the operators not
     // present anywhere in the complete main assignment.
-    let unavailable = if options.auto_rotation {
+    let mut unavailable = if options.auto_rotation {
         main.work_position_operator_names(blueprint)
     } else {
         main.operator_names()
     };
+    for (target, _) in targets {
+        unavailable.remove(target);
+    }
     let available = operbox.excluding(&unavailable);
     if options.auto_rotation {
         let mut seed = BaseAssignment::default();
@@ -9043,15 +9280,80 @@ pub(crate) fn solve_policy_disjoint_backup(
         super::auto_rotation::select_control(
             blueprint, &available, instances, table, options, &mut seed,
         )?;
-        return solve_owned_peak_seed(
+        if targets.is_empty() {
+            return solve_owned_peak_seed(
+                blueprint,
+                &available,
+                instances,
+                table,
+                options,
+                shift_hours,
+                &seed,
+            );
+        }
+        let mut planning_seed = seed.clone();
+        for (target, room) in targets {
+            let operator = main
+                .operators_in(room)
+                .iter()
+                .find(|op| op.name == *target)
+                .ok_or_else(|| Error::msg("continuous target absent from main room"))?;
+            let mut members = planning_seed.operators_in(room).to_vec();
+            members.push(operator.clone());
+            planning_seed.set_room(room.clone(), members);
+        }
+        let mut result = assign_shift_with_preclaimed_plan(
             blueprint,
             &available,
             instances,
             table,
             options,
-            shift_hours,
+            AssignShiftMode::Peak,
+            &planning_seed,
             &seed,
-        );
+            &HashSet::new(),
+            |plan| {
+                for (target, room_id) in targets {
+                    let room = blueprint
+                        .room(room_id)
+                        .ok_or_else(|| Error::msg("continuous target room absent"))?;
+                    let progress = available
+                        .progress_of(target)
+                        .ok_or_else(|| Error::msg("continuous target unavailable"))?;
+                    plan.anchors.push(SystemAnchor {
+                        system_id: "fiammetta_continuous".to_string(),
+                        operator: target.clone(),
+                        proactive_support: false,
+                        optional_trade_role: None,
+                        elite: progress.elite,
+                        facility: room.kind,
+                        room_id: Some(room_id.clone()),
+                        recipe: match &room.product {
+                            Some(RoomProduct::Factory { recipe }) => Some(*recipe),
+                            _ => None,
+                        },
+                        trade_order: match &room.product {
+                            Some(RoomProduct::Trade { order }) => Some(*order),
+                            _ => None,
+                        },
+                        work_mood: None,
+                        rest_facility: None,
+                        fill_policy: AnchorFillPolicy::Plain,
+                    });
+                }
+                Ok(())
+            },
+        )?;
+        result.plan.resolve_actual_producer_dependencies(
+            blueprint,
+            &result.assignment,
+            instances,
+            table,
+        )?;
+        return Ok(OwnedRotationAssignment {
+            assignment: result.assignment,
+            plan: result.plan,
+        });
     }
     solve_owned_peak_assignment(
         blueprint,
@@ -9192,6 +9494,7 @@ fn main_backup_24_24_probe_report(
         prepared: false,
         report: TeamRotationReport {
             profile: TimedRotationProfile::MainBackup24_24,
+            auxiliary_initial_mood: 24.0,
             peak_plan: main.plan.clone(),
             runtime_shift_binds: assignment_plans
                 .iter()
@@ -9286,6 +9589,8 @@ fn fill_owner_office_seats(
     if !has_office {
         return Ok(());
     }
+    let admitted = operbox.with_roster_eta(blueprint, instances, shift_hours)?;
+    let operbox = &admitted;
     let layout = crate::layout::resolve_base(
         blueprint,
         &owner.assignment,
@@ -9323,6 +9628,7 @@ fn fill_owner_office_seats(
         &HashSet::new(),
         &HashSet::new(),
         &candidates,
+        None,
     )?;
     Ok(())
 }
@@ -9997,6 +10303,7 @@ fn schedule_fiammetta_8_8_4_4(
         &[],
         &[],
         false,
+        None,
     )?;
     let binds = raw.runtime_shift_binds.clone();
     let fiammetta_owner = raw.shifts[0].assignment.clone();
@@ -10233,6 +10540,8 @@ fn solve_abyssal_profile_main(
     table: &SkillTable,
     options: &AssignBaseOptions,
 ) -> Result<ProfileOwnerCandidate> {
+    let admitted = operbox.with_roster_eta(blueprint, instances, 7.0)?;
+    let operbox = &admitted;
     let empty = HashSet::new();
     let Some(producer) = abyssal_control_producer(operbox, instances, &empty) else {
         return Ok(ProfileOwnerCandidate::Unavailable(
@@ -10864,6 +11173,7 @@ fn build_rotation_report_shell(
         prepared: false,
         report: TeamRotationReport {
             profile,
+            auxiliary_initial_mood: 24.0,
             peak_plan,
             assignment_plans,
             runtime_shift_binds,

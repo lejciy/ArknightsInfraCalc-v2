@@ -187,6 +187,34 @@ impl OperBox {
         )
     }
 
+    /// 普通辅助岗位由班次 owner 按当前心情和实际班长准入，不继承生产 peak 窗口。
+    /// 只释放这两个设施的初始 ETA；保留调用方已裁剪的 owned 和其他设施资格。
+    pub(crate) fn with_auxiliary_shift_admission(&self) -> Self {
+        let mut result = self.clone();
+        for facility in [
+            crate::layout::FacilityKind::Office,
+            crate::layout::FacilityKind::MeetingRoom,
+        ] {
+            if let Some(key) = crate::mood::facility_key(facility) {
+                result.facility_eta_exclusions.remove(key);
+            }
+        }
+        result
+    }
+
+    /// 按调用方已有计划窗口建立普通工作候选资格；已有初筛资格保持冻结。
+    pub(crate) fn with_roster_eta(
+        &self,
+        blueprint: &crate::layout::BaseBlueprint,
+        instances: &OperatorInstances,
+        hours: f64,
+    ) -> Result<Self> {
+        if !self.facility_eta_exclusions.is_empty() {
+            return Ok(self.clone());
+        }
+        self.with_auto_roster_eta(blueprint, instances, hours)
+    }
+
     /// 初始单人试算 policy：满中枢基础减耗、计划满房人数、自身技能；不借未来同房/中枢技能减免。
     pub(crate) fn with_auto_roster_eta(
         &self,
@@ -204,6 +232,10 @@ impl OperBox {
             if room.kind == crate::layout::FacilityKind::ControlCenter {
                 continue;
             }
+            result
+                .facility_eta_exclusions
+                .entry(key.to_string())
+                .or_default();
             for (name, progress) in &self.owned {
                 if !crate::mood::auto_roster_room_fits(
                     model, blueprint, room, instances, name, *progress, hours,

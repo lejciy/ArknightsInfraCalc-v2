@@ -48,6 +48,11 @@ use super::{inject_search_anchor_pool_entries, tag_pool_from_plan, AssignBaseOpt
 
 const SPHINX_NAME: &str = "深巡";
 const ULPIANUS_NAME: &str = "乌尔比安";
+const MONHUN_CONTROL_PAIR: [&str; 2] = ["火龙S黑角", "麒麟R夜刀"];
+const MATATABI_CONSUMER_NAME: &str = "泰拉大陆调查团";
+const MONHUN_CONTROL_SYSTEM_IDS: [&str; 2] =
+    ["snhunt_monhun_control", "snhunt_monhun_control_factory"];
+const MONHUN_PAIR_SYSTEM_ID: &str = "snhunt_monhun_control_pair";
 /// 唯一需要贸易/制造跨设施归属比较的干员（能力影子候选适用域，用户裁决 2026-09-01）。
 const SHADOW_TRADE_MANUFACTURE_OPERATOR: &str = "夜烟";
 
@@ -64,7 +69,10 @@ pub(super) fn run_shift_pipeline(
     mode: AssignShiftMode,
     seed: &BaseAssignment,
     plan: &AssignmentPlan,
-) -> Result<BaseAssignment> {
+) -> Result<(
+    BaseAssignment,
+    Option<crate::layout::system::RegistrySystemClaim>,
+)> {
     run_shift_pipeline_with_producer_pruning(
         blueprint, operbox, instances, table, options, mode, seed, plan, true,
     )
@@ -81,7 +89,10 @@ fn run_shift_pipeline_with_producer_pruning(
     seed: &BaseAssignment,
     plan: &AssignmentPlan,
     enable_producer_pruning: bool,
-) -> Result<BaseAssignment> {
+) -> Result<(
+    BaseAssignment,
+    Option<crate::layout::system::RegistrySystemClaim>,
+)> {
     let observe_control =
         std::env::var_os("ARKNIGHTS_INFRA_OBSERVE_CONTROL").is_some_and(|value| value == "1");
     macro_rules! observe {
@@ -160,6 +171,7 @@ fn run_shift_pipeline_with_producer_pruning(
         executed.assignment,
         executed.used,
     );
+    activate_deferred_monster_provider(&mut run, plan)?;
     timer.mark("plan_execute");
 
     // 建池（中枢 / 贸易 / 制造 / 发电）+ tier 标注 + anchor 注入。
@@ -231,6 +243,8 @@ fn run_shift_pipeline_with_producer_pruning(
                 run = finish_peak_prefix(
                     run,
                     plan,
+                    &control_pool,
+                    &control_exclusions,
                     &trade_pool,
                     &manu_pool,
                     &power_pool,
@@ -304,6 +318,8 @@ fn run_shift_pipeline_with_producer_pruning(
                     let Some(candidate) = finish_peak_prefix_candidate(
                         prepared.run,
                         plan,
+                        &control_pool,
+                        &control_exclusions,
                         &trade_pool,
                         &manu_pool,
                         &power_pool,
@@ -330,6 +346,8 @@ fn run_shift_pipeline_with_producer_pruning(
                         finish_peak_prefix_candidate(
                             run,
                             plan,
+                            &control_pool,
+                            &control_exclusions,
                             &trade_pool,
                             &manu_pool,
                             &power_pool,
@@ -377,13 +395,14 @@ fn run_shift_pipeline_with_producer_pruning(
                 gold_lines,
                 &forbid_same_room,
             )? {
-                if !optional_precision
+                if (!optional_precision
                     || !crate::response_dependency::karlan_precision_consumer_rooms(
                         blueprint,
                         &assignment,
                         instances,
                     )
-                    .is_empty()
+                    .is_empty())
+                    && preserves_deferred_monster_consumption(&run, &assignment)
                 {
                     run.assignment = assignment;
                     run.used = used;
@@ -435,7 +454,302 @@ fn run_shift_pipeline_with_producer_pruning(
             .map(|op| op.name.as_str())
             .collect::<Vec<_>>()
     );
-    Ok(run.assignment)
+    Ok((run.assignment, run.resolved_deferred_registry_claim))
+}
+
+fn activate_deferred_monster_provider(
+    run: &mut AssignmentRun<'_>,
+    plan: &AssignmentPlan,
+) -> Result<()> {
+    let Some(claim) = plan
+        .deferred_registry_claims
+        .iter()
+        .find(|claim| MONHUN_CONTROL_SYSTEM_IDS.contains(&claim.system_id.as_str()))
+    else {
+        return Ok(());
+    };
+    let required_control_slots = claim
+        .slots
+        .iter()
+        .filter(|slot| slot.facility == FacilityKind::ControlCenter)
+        .map(|slot| slot.operators.len())
+        .sum::<usize>();
+    if required_control_slots != MONHUN_CONTROL_PAIR.len()
+        || run.assignment.control_operators().len() + required_control_slots > 5
+    {
+        return Ok(());
+    }
+
+    let mut trial = run.assignment.clone();
+    let mut trial_used = run.used.clone();
+    match crate::layout::system::apply_registry_system_claim(
+        run.blueprint,
+        claim,
+        &mut trial,
+        &mut trial_used,
+    ) {
+        Ok(()) => {
+            run.assignment = trial;
+            run.used = trial_used;
+            run.deferred_monster_provider_active = true;
+        }
+        Err(Error::ScheduleQuality(_)) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn monster_pair_claim(
+    claim: &crate::layout::system::RegistrySystemClaim,
+) -> crate::layout::system::RegistrySystemClaim {
+    let mut pair = claim.clone();
+    pair.system_id = MONHUN_PAIR_SYSTEM_ID.to_string();
+    pair.priority = pair.priority.saturating_sub(1);
+    pair.slots
+        .retain(|slot| slot.facility == FacilityKind::ControlCenter);
+    pair
+}
+
+fn assignment_has_matatabi_consumption(
+    blueprint: &BaseBlueprint,
+    assignment: &BaseAssignment,
+) -> bool {
+    assignment
+        .rooms_of_kind(blueprint, FacilityKind::TradePost)
+        .any(|room| {
+            room.operators
+                .iter()
+                .any(|operator| operator.name == MATATABI_CONSUMER_NAME)
+        })
+        || assignment
+            .rooms_of_kind(blueprint, FacilityKind::Factory)
+            .any(|room| {
+                room.operators
+                    .iter()
+                    .any(|operator| operator.name == MATATABI_CONSUMER_NAME && operator.level >= 30)
+            })
+}
+
+fn preserves_deferred_monster_consumption(
+    run: &AssignmentRun<'_>,
+    candidate: &BaseAssignment,
+) -> bool {
+    let resolved_three = run
+        .resolved_deferred_registry_claim
+        .as_ref()
+        .is_some_and(|claim| MONHUN_CONTROL_SYSTEM_IDS.contains(&claim.system_id.as_str()));
+    !resolved_three || assignment_has_matatabi_consumption(run.blueprint, candidate)
+}
+
+fn try_commit_deferred_control_claim(
+    run: &mut AssignmentRun<'_>,
+    plan: &AssignmentPlan,
+    control_pool: &ControlPool,
+    control_exclusions: &HashSet<String>,
+    claim: Option<&crate::layout::system::RegistrySystemClaim>,
+) -> Result<bool> {
+    let mut trial = run.clone();
+    let (mut required, excluded) = run.peak_control_dynamic_set.clone().unwrap_or_default();
+    let mut protected = run.control_prefix_names.clone();
+    protected.extend(required.iter().cloned());
+    if let Some(claim) = claim {
+        let claimed: Vec<_> = claim
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.facility == FacilityKind::ControlCenter
+                    && slot.fill != crate::layout::system::SlotFillMode::Search
+            })
+            .flat_map(|slot| slot.operators.iter().cloned())
+            .collect();
+        let claimed_names: HashSet<_> = claimed
+            .iter()
+            .map(|operator| operator.name.clone())
+            .collect();
+        required.extend(claimed_names.iter().cloned());
+        let mut control = trial.assignment.control_operators();
+        for operator in claimed {
+            if !control
+                .iter()
+                .any(|existing| existing.name == operator.name)
+            {
+                control.push(operator);
+            }
+        }
+        let result = crate::control::solve_control(
+            &crate::control::ControlRoomInput {
+                operators: control
+                    .iter()
+                    .map(|operator| crate::control::ControlOperator {
+                        name: operator.name.clone(),
+                        elite: operator.elite,
+                        buff_ids: run
+                            .instances
+                            .resolve_control_buff_ids(&operator.name, operator.tier()),
+                        tags: run.instances.tags_for(&operator.name, operator.tier()),
+                    })
+                    .collect(),
+                mood: run.options.mood,
+                layout: trial.resolve_snapshot(true)?,
+            },
+            run.table,
+        );
+        let claimed_keys: HashSet<_> = result
+            .effect_ledger
+            .records()
+            .iter()
+            .filter(|record| claimed_names.contains(&record.source_operator))
+            .map(|record| record.key)
+            .collect();
+        let released: HashSet<_> = result
+            .effect_ledger
+            .records()
+            .iter()
+            .filter(|record| {
+                claimed_keys.contains(&record.key)
+                    && !claimed_names.contains(&record.source_operator)
+                    && !protected.contains(&record.source_operator)
+            })
+            .map(|record| record.source_operator.clone())
+            .collect();
+        trial
+            .assignment
+            .remove_operators_where(|room_id, operator| {
+                room_id.0 == "control" && released.contains(&operator.name)
+            });
+        trial.used.retain(|name| !released.contains(name));
+        // Control members enter through the common search as required sources;
+        // appending them after ordinary fill would bypass EffectKey admission.
+        let mut placements = claim.clone();
+        placements
+            .slots
+            .retain(|slot| slot.facility != FacilityKind::ControlCenter);
+        match crate::layout::system::apply_registry_system_claim(
+            run.blueprint,
+            &placements,
+            &mut trial.assignment,
+            &mut trial.used,
+        ) {
+            Ok(()) => {}
+            Err(Error::ScheduleQuality(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    let producer_layout = trial.resolve_snapshot(true)?;
+    let saileach_required = required.contains("琴柳")
+        || trial
+            .assignment
+            .control_operators()
+            .iter()
+            .any(|operator| operator.name == "琴柳")
+        || plan
+            .control_candidate_requirements
+            .iter()
+            .any(|requirement| {
+                requirement.min_count > 0
+                    && requirement.candidates.len() == 1
+                    && requirement.candidates.iter().any(|name| name == "琴柳")
+            });
+    if !assign_control_matching_dynamic_set_with_saileach(
+        &mut trial.assignment,
+        control_pool,
+        run.table,
+        &producer_layout,
+        run.options,
+        &plan.control_candidate_requirements,
+        &required,
+        &excluded,
+        control_exclusions,
+        run.peak_control_saileach_best_office_pct,
+        saileach_required,
+        None,
+        &mut trial.used,
+    )? {
+        return Ok(false);
+    }
+    let control = trial.assignment.control_operators();
+    let capacity = run
+        .blueprint
+        .rooms
+        .iter()
+        .find(|room| room.kind == FacilityKind::ControlCenter)
+        .map(|room| room.operator_capacity())
+        .unwrap_or(0);
+    if control.len() != capacity {
+        return Ok(false);
+    }
+    trial.resolved_deferred_registry_claim = claim.cloned();
+    *run = trial;
+    Ok(true)
+}
+
+fn finalize_deferred_monster_claim(
+    run: &mut AssignmentRun<'_>,
+    plan: &AssignmentPlan,
+    control_pool: &ControlPool,
+    control_exclusions: &HashSet<String>,
+) -> Result<()> {
+    if !run.deferred_monster_provider_active {
+        return Ok(());
+    }
+    let Some(monster) = plan
+        .deferred_registry_claims
+        .iter()
+        .find(|claim| MONHUN_CONTROL_SYSTEM_IDS.contains(&claim.system_id.as_str()))
+    else {
+        return Ok(());
+    };
+    if assignment_has_matatabi_consumption(run.blueprint, &run.assignment) {
+        run.resolved_deferred_registry_claim = Some(monster.clone());
+        return Ok(());
+    }
+
+    run.assignment.remove_operators_where(|room_id, operator| {
+        room_id.0 == "control" && MONHUN_CONTROL_PAIR.contains(&operator.name.as_str())
+    });
+    for name in MONHUN_CONTROL_PAIR {
+        run.used.remove(name);
+    }
+
+    let fallback = plan
+        .deferred_registry_claims
+        .iter()
+        .find(|claim| claim.system_id != monster.system_id);
+    if let Some(fallback) = fallback {
+        if try_commit_deferred_control_claim(
+            run,
+            plan,
+            control_pool,
+            control_exclusions,
+            Some(fallback),
+        )? {
+            return Ok(());
+        }
+    }
+
+    if try_commit_deferred_control_claim(run, plan, control_pool, control_exclusions, None)? {
+        let control = run.assignment.control_operators();
+        let pair_is_selected = MONHUN_CONTROL_PAIR
+            .iter()
+            .all(|name| control.iter().any(|operator| operator.name == *name));
+        if pair_is_selected {
+            run.resolved_deferred_registry_claim = Some(monster_pair_claim(monster));
+        }
+        return Ok(());
+    }
+
+    if !try_commit_deferred_control_claim(
+        run,
+        plan,
+        control_pool,
+        control_exclusions,
+        Some(&monster_pair_claim(monster)),
+    )? {
+        run.assignment
+            .construction_warnings
+            .push("control: no legal fill after deferred monster withdrawal".into());
+    }
+    Ok(())
 }
 
 fn producer_pruning_enabled(requested: bool, policy: ScoringPolicyId) -> bool {
@@ -1327,6 +1641,13 @@ fn fill_peak_control(
     saileach_best_office_pct: Option<f64>,
     stable_order: usize,
 ) -> Result<bool> {
+    run.peak_control_dynamic_set = dynamic_set.map(|(required, excluded)| {
+        (
+            required.iter().cloned().collect(),
+            excluded.iter().cloned().collect(),
+        )
+    });
+    run.peak_control_saileach_best_office_pct = saileach_best_office_pct;
     let observe_control =
         std::env::var_os("ARKNIGHTS_INFRA_OBSERVE_CONTROL").is_some_and(|value| value == "1");
     macro_rules! observe {
@@ -1422,6 +1743,8 @@ fn fill_peak_control(
 fn finish_peak_prefix_candidate<'a>(
     run: AssignmentRun<'a>,
     plan: &AssignmentPlan,
+    control_pool: &ControlPool,
+    control_exclusions: &HashSet<String>,
     base_trade_pool: &TradePool,
     manu_pool: &crate::pool::ManuPool,
     power_pool: &PowerPool,
@@ -1433,6 +1756,8 @@ fn finish_peak_prefix_candidate<'a>(
     let mut run = finish_peak_prefix(
         run,
         plan,
+        control_pool,
+        control_exclusions,
         base_trade_pool,
         manu_pool,
         power_pool,
@@ -1506,6 +1831,8 @@ fn finish_peak_prefix_candidate<'a>(
 fn finish_peak_prefix<'a>(
     mut run: AssignmentRun<'a>,
     plan: &AssignmentPlan,
+    control_pool: &ControlPool,
+    control_exclusions: &HashSet<String>,
     base_trade_pool: &TradePool,
     manu_pool: &crate::pool::ManuPool,
     power_pool: &PowerPool,
@@ -1549,19 +1876,35 @@ fn finish_peak_prefix<'a>(
         &mut run.used,
         run.instances,
     )?;
-    assign_trade_remainder_with_plan_anchors(
-        run.blueprint,
-        &trade_pool,
-        run.table,
-        run.instances,
-        gold_lines,
-        run.options,
-        Some(run.durin_plan),
-        &plan.anchors,
-        &mut run.assignment,
-        &mut run.used,
-    )?;
+    let joint = !run.options.auto_rotation
+        && super::trade_joint::assign_trade_joint(
+            run.blueprint,
+            &trade_pool,
+            run.table,
+            run.instances,
+            run.options,
+            Some(run.durin_plan),
+            Some(plan),
+            None,
+            &mut run.assignment,
+            &mut run.used,
+        )?;
+    if !joint {
+        assign_trade_remainder_with_plan_anchors(
+            run.blueprint,
+            &trade_pool,
+            run.table,
+            run.instances,
+            gold_lines,
+            run.options,
+            Some(run.durin_plan),
+            &plan.anchors,
+            &mut run.assignment,
+            &mut run.used,
+        )?;
+    }
     cleanup_unused_sphinx_urrbian_dorm_anchor(run.blueprint, &mut run.assignment, &mut run.used);
+    finalize_deferred_monster_claim(&mut run, plan, control_pool, control_exclusions)?;
 
     let manu_layout = run.resolve_snapshot(true)?;
     assign_manufacture_lines(

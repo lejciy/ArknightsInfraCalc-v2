@@ -10,6 +10,7 @@ mod producer_fill;
 mod run;
 mod team_fill;
 pub(crate) mod trade_fill;
+mod trade_joint;
 
 pub(crate) use control_fill::assign_control_with_saileach;
 pub(crate) use manufacture_fill::assign_manu_room_with_anchors;
@@ -162,7 +163,11 @@ pub(super) fn tag_pool_from_plan<T: crate::pool::HasName + crate::pool::TierTagg
     plan: &AssignmentPlan,
     pool: &mut crate::pool::PoolCore<T>,
 ) {
-    for claim in &plan.registry_claims {
+    for claim in plan
+        .registry_claims
+        .iter()
+        .chain(plan.deferred_registry_claims.iter())
+    {
         let mut names = HashSet::new();
         for slot in &claim.slots {
             for op in &slot.operators {
@@ -181,7 +186,11 @@ pub(super) fn inject_search_anchor_pool_entries(
     trade_pool: &mut crate::pool::TradePool,
     manu_pool: &mut crate::pool::ManuPool,
 ) {
-    for claim in &plan.registry_claims {
+    for claim in plan
+        .registry_claims
+        .iter()
+        .chain(plan.deferred_registry_claims.iter())
+    {
         for slot in &claim.slots {
             if slot.fill != SlotFillMode::Search {
                 continue;
@@ -208,6 +217,9 @@ fn inject_trade_anchor(
     table: &SkillTable,
     pool: &mut crate::pool::TradePool,
 ) {
+    if !operbox.admits_facility(name, FacilityKind::TradePost) {
+        return;
+    }
     if pool.entry(name).is_some() {
         return;
     }
@@ -239,6 +251,9 @@ fn inject_manu_anchor(
     table: &SkillTable,
     pool: &mut crate::pool::ManuPool,
 ) {
+    if !operbox.admits_facility(name, FacilityKind::Factory) {
+        return;
+    }
     if pool.entry(name).is_some() {
         return;
     }
@@ -274,6 +289,8 @@ pub fn assign_shift_with_plan(
     seed: &BaseAssignment,
 ) -> Result<AssignShiftResult> {
     let _memo_scope = crate::search::ensure_search_memo_scope();
+    let admitted = operbox.with_roster_eta(blueprint, instances, options.shift_hours)?;
+    let operbox = &admitted;
     let enabled = assign_shift_with_preclaimed_plan(
         blueprint,
         operbox,
@@ -317,7 +334,7 @@ pub fn assign_shift_with_plan(
     let mut disabled = disabled;
     complete_standalone_assignment(blueprint, operbox, instances, table, options, &mut enabled)?;
     complete_standalone_assignment(blueprint, operbox, instances, table, options, &mut disabled)?;
-    Ok(select_four_gold_trade_winner(enabled, disabled))
+    Ok(select_four_gold_trade_winner(blueprint, enabled, disabled))
 }
 
 pub(crate) fn complete_standalone_assignment(
@@ -328,6 +345,8 @@ pub(crate) fn complete_standalone_assignment(
     options: &AssignBaseOptions,
     result: &mut AssignShiftResult,
 ) -> Result<()> {
+    let admitted = operbox.with_roster_eta(blueprint, instances, options.shift_hours)?;
+    let operbox = &admitted;
     let control_operbox;
     let forbidden_control_names = if options.auto_rotation {
         control_operbox = crate::pool::auto_rotation_control_roster(operbox, instances, table)?;
@@ -491,36 +510,38 @@ fn four_gold_selected(plan: &AssignmentPlan) -> bool {
         .any(|rule| rule.rule_id == "pozyomka_durin")
 }
 
-fn trade_assignment_score(assignment: &BaseAssignment) -> crate::Efficiency {
-    assignment
-        .iter_rooms()
-        .filter_map(|room| room.efficiency.as_ref())
-        .map(|snapshot| {
-            snapshot.trade_total_efficiency
-                * if snapshot.trade_unit_output_multiplier.is_zero() {
-                    crate::Efficiency::ONE
-                } else {
-                    snapshot.trade_unit_output_multiplier
-                }
-        })
-        .sum()
+fn trade_assignment_score(
+    blueprint: &BaseBlueprint,
+    assignment: &BaseAssignment,
+) -> crate::search::trade_allocation::TradeAllocationScore {
+    let mut score = crate::search::trade_allocation::TradeAllocationScore::default();
+    for room in blueprint.rooms_of(FacilityKind::TradePost) {
+        if let (Ok(order), Some(snapshot)) = (
+            trade_fill::trade_order_from_room(room),
+            assignment.efficiency_in(&room.id),
+        ) {
+            score = score.add_room(order, snapshot.trade_final_efficiency);
+        }
+    }
+    score
 }
 
 fn select_four_gold_trade_winner(
+    blueprint: &BaseBlueprint,
     enabled: AssignShiftResult,
     disabled: AssignShiftResult,
 ) -> AssignShiftResult {
-    let enabled_score = trade_assignment_score(&enabled.assignment);
-    let disabled_score = trade_assignment_score(&disabled.assignment);
+    let enabled_score = trade_assignment_score(blueprint, &enabled.assignment);
+    let disabled_score = trade_assignment_score(blueprint, &disabled.assignment);
     if enabled_score > disabled_score {
         eprintln!(
-            "[four-gold-candidate] winner=enabled enabled_trade={} disabled_trade={}",
+            "[four-gold-candidate] winner=enabled enabled_trade={:?} disabled_trade={:?}",
             enabled_score, disabled_score
         );
         enabled
     } else {
         eprintln!(
-            "[four-gold-candidate] winner=disabled enabled_trade={} disabled_trade={}",
+            "[four-gold-candidate] winner=disabled enabled_trade={:?} disabled_trade={:?}",
             enabled_score, disabled_score
         );
         disabled
@@ -573,7 +594,7 @@ where
         &ordinary_skip,
         &augment_plan,
     )?;
-    Ok(select_four_gold_trade_winner(enabled, disabled))
+    Ok(select_four_gold_trade_winner(blueprint, enabled, disabled))
 }
 
 /// 同 [`assign_shift_with_plan`]，额外允许跳过指定体系。
@@ -622,6 +643,8 @@ where
 {
     let _memo_scope = crate::search::ensure_search_memo_scope();
     blueprint.validate()?;
+    let admitted = operbox.with_roster_eta(blueprint, instances, options.shift_hours)?;
+    let operbox = &admitted;
 
     let mut planning_seed = planning_seed.clone();
     let mut execution_seed = execution_seed.clone();
@@ -669,16 +692,47 @@ where
 
         let stage_started = Instant::now();
         let stage_before = crate::profile::solver_perf_snapshot();
-        let assignment_result = pipeline::run_shift_pipeline(
-            blueprint,
-            operbox,
-            instances,
-            table,
-            options,
-            mode,
-            &execution_seed,
-            &plan,
-        );
+        let mut variant_stage = crate::profile::start_solver_stage("shift", "trade_plan_variants");
+        let variants = plan.trade_placement_variants(blueprint, &execution_seed);
+        let assignment_result = (|| {
+            let mut winner = None;
+            let mut first_retry_error = None;
+            for variant in variants {
+                match pipeline::run_shift_pipeline(
+                    blueprint,
+                    operbox,
+                    instances,
+                    table,
+                    options,
+                    mode,
+                    &execution_seed,
+                    &variant,
+                ) {
+                    Ok((assignment, deferred)) => {
+                        let score = trade_assignment_score(blueprint, &assignment);
+                        if winner.as_ref().is_none_or(|(_, _, _, best)| score > *best) {
+                            winner = Some((variant, assignment, deferred, score));
+                        }
+                    }
+                    Err(
+                        error @ (Error::OptionalTradeRoleInfeasible { .. }
+                        | Error::GoldFlowCoreInfeasible { .. }),
+                    ) => {
+                        first_retry_error.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Some((selected_plan, assignment, deferred, _)) = winner {
+                plan = selected_plan;
+                Ok((assignment, deferred))
+            } else {
+                Err(first_retry_error
+                    .unwrap_or_else(|| Error::no_candidate("no legal trade Plan placement")))
+            }
+        })();
+        variant_stage.record_result(&assignment_result);
+        drop(variant_stage);
         let stage_after = crate::profile::solver_perf_snapshot();
         crate::profile::emit_solver_stage(
             "shift",
@@ -692,8 +746,8 @@ where
             stage_before,
             stage_after,
         );
-        let assignment = match assignment_result {
-            Ok(assignment) => assignment,
+        let (assignment, deferred_registry_claim) = match assignment_result {
+            Ok(result) => result,
             Err(Error::OptionalTradeRoleInfeasible {
                 system_id,
                 role_id,
@@ -723,6 +777,7 @@ where
             }
             Err(error) => return Err(error),
         };
+        plan.commit_deferred_registry_claim(deferred_registry_claim);
 
         let requires_final_pack_check = plan.rotation_reserves.iter().any(|reserve| {
             reserve.require_pre_split_halves

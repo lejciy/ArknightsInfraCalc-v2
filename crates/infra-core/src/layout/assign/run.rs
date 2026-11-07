@@ -13,6 +13,7 @@ use crate::layout::assignment::BaseAssignment;
 use crate::layout::blueprint::BaseBlueprint;
 use crate::layout::context::LayoutContext;
 use crate::layout::resolve::resolve_layout_snapshot;
+use crate::layout::system::RegistrySystemClaim;
 use crate::operbox::OperBox;
 use crate::profile::{
     emit_resolve_stage, emit_solver_stage, solver_perf_snapshot, SolverPerfSnapshot,
@@ -32,6 +33,12 @@ pub(super) struct AssignmentRun<'a> {
     pub durin_plan: u8,
     pub assignment: BaseAssignment,
     pub used: HashSet<String>,
+    /// Plan/seed members precede the temporary deferred provider and ordinary fill.
+    pub control_prefix_names: HashSet<String>,
+    pub resolved_deferred_registry_claim: Option<RegistrySystemClaim>,
+    pub deferred_monster_provider_active: bool,
+    pub peak_control_dynamic_set: Option<(HashSet<String>, HashSet<String>)>,
+    pub peak_control_saileach_best_office_pct: Option<f64>,
 }
 
 impl<'a> AssignmentRun<'a> {
@@ -45,6 +52,11 @@ impl<'a> AssignmentRun<'a> {
         used: HashSet<String>,
     ) -> Self {
         let durin_plan = operbox.durin_dorm_planning_count(instances);
+        let control_prefix_names = assignment
+            .control_operators()
+            .into_iter()
+            .map(|operator| operator.name)
+            .collect();
         Self {
             blueprint,
             operbox,
@@ -54,6 +66,11 @@ impl<'a> AssignmentRun<'a> {
             durin_plan,
             assignment,
             used,
+            control_prefix_names,
+            resolved_deferred_registry_claim: None,
+            deferred_monster_provider_active: false,
+            peak_control_dynamic_set: None,
+            peak_control_saileach_best_office_pct: None,
         }
     }
 

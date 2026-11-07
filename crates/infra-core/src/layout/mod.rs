@@ -41,7 +41,7 @@ pub use orchestrate::{
     ReserveReusePolicy, ResolvedRoleReserve, SelectedRuleAlternative, ShiftBind, SlotFill,
     SystemAnchor, SystemConstraint,
 };
-pub(crate) use resolve::resolve_control_input_layout;
+pub(crate) use resolve::{deduct_room_global_atoms, resolve_control_input_layout};
 pub use resolve::{
     resolve_automation_group_1_layout, resolve_base, resolve_base_with_trace,
     resolve_search_baseline_layout, resolve_snhunt_baseline_layout,
@@ -50,6 +50,7 @@ pub use resolve::{
     ResolvedTradeRoom,
 };
 pub use shift::AssignShiftMode;
+pub(crate) use system::SlotFillMode;
 pub use system::{
     apply_registry_system_claim, claim_base_systems, default_base_systems_path, load_base_systems,
     select_registry_systems, RegistrySlotClaim, RegistrySystemClaim, SystemExplainEntry,

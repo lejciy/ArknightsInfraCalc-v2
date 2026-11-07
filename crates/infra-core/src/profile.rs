@@ -393,27 +393,16 @@ impl BakeMissKind {
 pub(crate) enum BakeColdPhase {
     Init,
     Generate,
-    Validate,
-    Verify,
     Index,
     Publish,
 }
 
 impl BakeColdPhase {
-    const ALL: [Self; 6] = [
-        Self::Init,
-        Self::Generate,
-        Self::Validate,
-        Self::Verify,
-        Self::Index,
-        Self::Publish,
-    ];
+    const ALL: [Self; 4] = [Self::Init, Self::Generate, Self::Index, Self::Publish];
     fn label(self) -> &'static str {
         match self {
             Self::Init => "init",
             Self::Generate => "generate",
-            Self::Validate => "validate",
-            Self::Verify => "verify",
             Self::Index => "index",
             Self::Publish => "publish",
         }
@@ -433,7 +422,7 @@ pub struct BakeMetrics {
     pub manufacture_misses: [u64; BakeMissKind::ALL.len()],
     pub trade_errors: u64,
     pub manufacture_errors: u64,
-    pub cold: [BakeColdMetrics; 6],
+    pub cold: [BakeColdMetrics; 4],
 }
 
 impl BakeMetrics {
@@ -469,7 +458,7 @@ impl BakeMetrics {
         result.manufacture_errors = self
             .manufacture_errors
             .saturating_sub(before.manufacture_errors);
-        for i in 0..6 {
+        for i in 0..BakeColdPhase::ALL.len() {
             result.cold[i] = BakeColdMetrics {
                 calls: self.cold[i].calls.saturating_sub(before.cold[i].calls),
                 errors: self.cold[i].errors.saturating_sub(before.cold[i].errors),
@@ -609,7 +598,7 @@ pub struct SearchPhaseDurations {
 }
 
 // IDs are stable within diagnostic schema v2; the final slot safely combines unknown labels.
-const STAGE_LABELS: [(&str, &str); 61] = [
+const STAGE_LABELS: [(&str, &str); 64] = [
     ("search", "control"),
     ("search", "trade"),
     ("search", "manufacture"),
@@ -671,12 +660,18 @@ const STAGE_LABELS: [(&str, &str); 61] = [
     ("rotation_abc", "fiammetta_backup"),
     ("rotation_abc", "originium_pair"),
     ("rotation_backup", "disjoint"),
+    ("search", "trade_allocation"),
+    ("shift", "trade_plan_variants"),
+    ("shift_pipeline", "trade_joint_fill"),
 ];
 const OVERFLOW_STAGE_ID: usize = STAGE_LABELS.len();
 const STAGE_SLOT_COUNT: usize = STAGE_LABELS.len() + 1;
 
 fn stage_id(scope: &str, stage: &str) -> usize {
     match (scope, stage) {
+        ("search", "trade_allocation") => 61,
+        ("shift", "trade_plan_variants") => 62,
+        ("shift_pipeline", "trade_joint_fill") => 63,
         ("search", "control") => 0,
         ("search", "trade") => 1,
         ("search", "manufacture") => 2,

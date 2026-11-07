@@ -7,7 +7,8 @@
 > 代码锚点：`crates/infra-core/src/cross_facility/collector.rs::{GlobalAtomEntry,collect_global_atoms}`; `crates/infra-core/src/cross_facility/interpreter.rs::orchestrate_global_atoms`; `crates/infra-core/src/cross_facility/interpreter.rs::{condition_met,apply_state_write}`; `crates/infra-core/src/global_resource/pool.rs::GlobalResourcePool`; `crates/infra-core/src/global_resource/inject.rs::GlobalInjectManifest`
 > 关联链路：`docs/模块/中枢与跨设施状态.md`; `docs/调用链/跨设施状态刷新.md`
 > 核验基线：`947f1a2`
+> 摘要：说明跨设施 atom 收集、解释、全局资源注入与状态写回的内部实现
 
 collector 遍历当前 BaseAssignment，按设施、tier、binding 找到 buff ids，只收集 `atom.scope == Global`，并按 phase 排序。宿舍/办公室低练度 global atom 默认跳过，`SilentEcho` 是显式例外。interpreter 当前只实际执行 `StateWrite`（StateProduce/StateConvert）；其他 phase 留给 control 或房间域。
 
-`resolve_base` 将结果合并到 `LayoutContext.global`，再由 global resource/inject 和各域输入消费。Global atom 不应在 per-room interpreter 再算；否则会重复贡献。未知 key、不可用 selector 或未满足 admission 应保持 delegated/零贡献，不注入假 buff。
+`resolve_base` 将结果合并到 `LayoutContext.global`，再由 global resource/inject 和各域输入消费。已计入全局快照的贡献不能在房内重复计入：当前贸易/制造房输入先扣回本房的Global StateProduce，再让房内解释器执行一次；贸易候选搜索仅扣回原快照中已有候选的贡献，未进驻候选直接在房内首次执行。扣回共享resolve实现，入口合同见[贸易求解](../模块/贸易求解.md#搜索与跨站)。未知 key、不可用 selector 或未满足 admission 应保持 delegated/零贡献，不注入假 buff。
