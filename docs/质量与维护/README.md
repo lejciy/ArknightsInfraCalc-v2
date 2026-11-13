@@ -10,6 +10,7 @@
 | 问题 | 入口 |
 |---|---|
 | 交付需要什么保证和证据 | [质量、求解保证与验证证据](QUALITY_AND_AUDIT.md) |
+| 如何组织 AI 辅助代码审阅 | [AI 辅助代码审阅操作指南](AI辅助代码审阅操作指南.md) |
 | 已知错误如何复现和选择首个修复层 | [Debug 与一致性修复指南](MAINTENANCE_MODE.md) |
 | 热路径、Bake、缓存与性能错误如何区分 | [搜索性能与 Bake 边界](PERFORMANCE_ENGINEERING.md) |
 | 体系逐项审计怎么做 | [体系审计工作流](SYSTEM_AUDIT_WORKFLOW.md) |
@@ -24,6 +25,7 @@
 <!-- BEGIN GENERATED DOMAIN DOCUMENTS -->
 | 文档 | 角色 | 状态 | 摘要 |
 |---|---|---|---|
+| [AI 辅助代码审阅操作指南](AI辅助代码审阅操作指南.md) | `current-reference` | `current` | 将现有 AI 审阅规则组织为可执行步骤、材料清单和任务模板，区分通用方法与 v2 验证入口 |
 | [Debug 与一致性修复指南](MAINTENANCE_MODE.md) | `canonical` | `current` | 按症状、调用链和证据阶段修复既有结果错误 |
 | [搜索性能与 Bake 边界](PERFORMANCE_ENGINEERING.md) | `current-reference` | `current` | 说明搜索热路径、Bake、缓存、continuation 与验证成本边界 |
 | [质量、求解保证与验证证据总则](QUALITY_AND_AUDIT.md) | `canonical` | `current` | 裁决质量、求解保证和交付证据要求 |
